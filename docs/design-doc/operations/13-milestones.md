@@ -16,7 +16,7 @@ The repo's current release line is `v0.1.0-alpha.*` (see recent tags and `pkg/ar
 |-------------|--------|
 | `Provider` interface and `InfraSettings` capability struct (`pkg/providers/cluster/provider.go`) | ✅ |
 | Unified provider registry (`pkg/registry.Registry` with `ClusterProviders` + `DNSProviders`) | ✅ |
-| AWS cluster provider (EKS via upstream `nebari-dev/eks-cluster` module, EFS, node groups) | ✅ |
+| AWS cluster provider (EKS via temporary personal fork `github.com/nenb/terraform-aws-eks-cluster` at full commit `c3017c0e15b538cd4e04c0786809a861ea82c621`, EFS, node groups) | ✅ |
 | Hetzner cluster provider (via `hetzner-k3s` binary) | ✅ |
 | Local cluster provider (creates a Kind cluster via `nic deploy`) | ✅ |
 | `existing` cluster provider (adopt a kubeconfig) | ✅ |

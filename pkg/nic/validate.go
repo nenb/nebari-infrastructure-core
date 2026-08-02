@@ -7,6 +7,7 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"github.com/nebari-dev/nebari-infrastructure-core/pkg/config"
+	"github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/cluster"
 	"github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/dns"
 	"github.com/nebari-dev/nebari-infrastructure-core/pkg/registry"
 )
@@ -24,6 +25,12 @@ func (c *Client) Validate(ctx context.Context, cfg *config.NebariConfig) error {
 		return fmt.Errorf("configuration validation failed: %w", err)
 	}
 
+	clusterProvider, err := validateClusterProviderOffline(ctx, cfg, c.registry)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("configuration validation failed: %w", err)
+	}
+
 	// Offline DNS provider validation (zone consistency) runs here and in
 	// deploy so misconfigurations surface before any infrastructure is
 	// provisioned. Destroy and kubeconfig deliberately skip it: destroy
@@ -37,17 +44,37 @@ func (c *Client) Validate(ctx context.Context, cfg *config.NebariConfig) error {
 	// InfraSettings is a pure getter (no cloud I/O), so we can consult the
 	// registered provider here and catch the misconfiguration at validate time
 	// rather than mid-deploy.
-	clusterProvider, err := c.registry.ClusterProviders.Get(ctx, cfg.Cluster.ProviderName())
-	if err != nil {
-		span.RecordError(err)
-		return fmt.Errorf("get cluster provider %q: %w", cfg.Cluster.ProviderName(), err)
-	}
 	if err := ensureBackupsHaveLonghorn(cfg, clusterProvider.InfraSettings(cfg.Cluster).StorageClass); err != nil {
 		span.RecordError(err)
 		return fmt.Errorf("configuration validation failed: %w", err)
 	}
 
 	return nil
+}
+
+// validateClusterProviderOffline resolves the configured provider and invokes
+// its optional no-I/O semantic validation capability. Returning the provider
+// lets callers reuse the same abstraction without a provider-name switch.
+func validateClusterProviderOffline(ctx context.Context, cfg *config.NebariConfig, reg *registry.Registry) (cluster.Provider, error) {
+	tracer := otel.Tracer("nebari-infrastructure-core")
+	ctx, span := tracer.Start(ctx, "nic.validateClusterProviderOffline")
+	defer span.End()
+
+	providerName := cfg.Cluster.ProviderName()
+	clusterProvider, err := reg.ClusterProviders.Get(ctx, providerName)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("get cluster provider %q: %w", providerName, err)
+	}
+	validator, ok := clusterProvider.(cluster.OfflineValidator)
+	if !ok {
+		return clusterProvider, nil
+	}
+	if err := validator.ValidateOffline(ctx, cfg.ProjectName, cfg.Cluster); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("invalid %s cluster configuration: %w", providerName, err)
+	}
+	return clusterProvider, nil
 }
 
 // validateDNSProvider runs the registered DNS provider's offline validation

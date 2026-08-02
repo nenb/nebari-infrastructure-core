@@ -20,7 +20,7 @@
 
 **Decision:** The `cluster.Provider` interface is the abstraction. Each provider implementation chooses the right backing tool for its environment:
 
-- **AWS:** OpenTofu, via the `terraform-exec` Go library, running the upstream `nebari-dev/eks-cluster` registry module
+- **AWS:** OpenTofu, via the `terraform-exec` Go library, running the temporary personal fork `github.com/nenb/terraform-aws-eks-cluster` pinned at full commit `c3017c0e15b538cd4e04c0786809a861ea82c621` for review
 - **Hetzner:** the `hetzner-k3s` binary, talking directly to the Hetzner Cloud API
 - **Local:** Kind. The local provider's `Deploy` creates the Kind cluster (reusing it if one already exists) and then bootstraps it; `Destroy` deletes it. Run it with `nic deploy -f examples/local-config.yaml`.
 - **Existing:** no IaC at all - the provider reads `kubeconfig` and `context` from config and adopts the cluster

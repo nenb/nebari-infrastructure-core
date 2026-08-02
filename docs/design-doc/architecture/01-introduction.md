@@ -46,7 +46,7 @@ This document describes the architectural design for Nebari Infrastructure Core 
                            ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ Cluster Provider (per-provider backing tool)                │
-│ - AWS: OpenTofu (EKS via nebari-dev/eks-cluster module)     │
+│ - AWS: OpenTofu (temporary nenb fork; full SHA pin)         │
 │ - Hetzner: hetzner-k3s binary                               │
 │ - Local: Kind (`nic deploy` provisions the cluster)         │
 │ - Existing: no-op adapter for pre-provisioned clusters      │
@@ -106,7 +106,7 @@ NIC's foundational stack ships only the OpenTelemetry Collector; a full LGTM (Lo
 | Auth integration is tedious | Operator automates OAuth client creation |
 | Observability is an afterthought | OpenTelemetry Collector deployed by default (backend pending) |
 | Certificate management is painful | cert-manager plus automated route TLS |
-| Battle-tested modules beat hand-rolled IaC | AWS uses the upstream `nebari-dev/eks-cluster` module |
+| Battle-tested modules beat hand-rolled IaC | AWS temporarily uses personal fork `github.com/nenb/terraform-aws-eks-cluster` pinned at full commit `c3017c0e15b538cd4e04c0786809a861ea82c621` for review |
 | Multi-cloud drift is real | The `Provider` interface enforces the consistent contract |
 | GitOps reduces deployment errors | ArgoCD for all foundational components |
 

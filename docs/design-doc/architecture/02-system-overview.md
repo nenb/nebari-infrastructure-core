@@ -27,8 +27,9 @@
 │ 3. Cluster Provisioning (provider-specific)                 │
 │    - AWS:     pkg/tofu.Setup → OpenTofu init/plan/apply     │
 │               using embedded templates that call the        │
-│               upstream nebari-dev/eks-cluster Terraform     │
-│               module. State lives in S3 with native         │
+│               temporary github.com/nenb personal fork at    │
+│               c3017c0e15b538cd4e04c0786809a861ea82c621.    │
+│               State lives in S3 with native                 │
 │               lockfile-based locking.                       │
 │    - Hetzner: shells out to the hetzner-k3s binary against  │
 │               the Hetzner Cloud API. No tofu involved.      │

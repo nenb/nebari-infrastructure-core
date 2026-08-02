@@ -110,6 +110,15 @@ type InfraSettings struct {
 	LonghornEnabled bool
 }
 
+// OfflineValidator is an optional provider capability for complete, provider-
+// specific semantic validation that performs no network, filesystem, credential,
+// subprocess, or cluster I/O. Client.Validate and Client.Deploy invoke it before
+// any provider I/O or provisioning; providers that do not implement it retain
+// structural config validation only.
+type OfflineValidator interface {
+	ValidateOffline(ctx context.Context, projectName string, clusterConfig *config.ClusterConfig) error
+}
+
 // Provider defines the interface that all cloud providers must implement.
 //
 // This interface establishes the abstraction boundary between CLI commands and

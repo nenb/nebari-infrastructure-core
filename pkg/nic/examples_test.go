@@ -16,10 +16,10 @@ import (
 // (`hetzner_cloud:`) to the nested `cluster:` block, the examples were updated
 // by hand and there was no test to confirm it.
 //
-// This covers config-level validation only, which is the same depth as
-// `nic validate`. Provider-level validation (for example
-// cluster.hetzner.location is required) is not reached by Client.Validate, so a
-// green result here does not mean an example would deploy.
+// This covers structural validation plus any registered provider's optional
+// no-I/O OfflineValidator, which is the same depth as `nic validate`. It does
+// not check credentials or cloud/cluster state, so a green result here does not
+// mean an example would deploy.
 func TestExampleConfigsValidate(t *testing.T) {
 	paths, err := filepath.Glob(filepath.Join("..", "..", "examples", "*.yaml"))
 	if err != nil {

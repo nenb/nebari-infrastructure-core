@@ -31,7 +31,7 @@ type Config struct {
 	ClusterAutoscaler         *ClusterAutoscalerConfig         `yaml:"cluster_autoscaler,omitempty"`
 	LoadBalancerScheme        string                           `yaml:"load_balancer_scheme,omitempty"`
 	// EnableIRSA toggles creation of the EKS OIDC provider for IAM Roles for
-	// Service Accounts. When unset, the upstream module default (true) applies.
+	// Service Accounts. When unset, the pinned external module default (true) applies.
 	// Set false when the cluster relies exclusively on EKS Pod Identity, or
 	// when the VPC cannot resolve oidc.eks.<region>.amazonaws.com (a fully
 	// private deployment with no public DNS resolution for AWS hostnames).

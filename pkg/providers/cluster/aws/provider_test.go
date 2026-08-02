@@ -9,8 +9,11 @@ import (
 	"github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/cluster"
 )
 
-// Compile-time interface compliance check
-var _ cluster.Provider = (*Provider)(nil)
+// Compile-time interface compliance checks.
+var (
+	_ cluster.Provider         = (*Provider)(nil)
+	_ cluster.OfflineValidator = (*Provider)(nil)
+)
 
 // TestProviderName tests the Name method
 func TestProviderName(t *testing.T) {

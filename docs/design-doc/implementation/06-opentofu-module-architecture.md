@@ -24,7 +24,7 @@ pkg/providers/cluster/aws/
 ├── cleanup.go / cleanup_k8s.go        # Pre-destroy resource cleanup
 ├── version.go                         # Provider-version probe
 └── templates/                         # Embedded via go:embed
-    ├── main.tf                        # Calls upstream nebari-dev/eks-cluster module
+    ├── main.tf                        # Calls temporary personal fork pinned by full SHA
     ├── variables.tf                   # tfvars input schema
     ├── outputs.tf                     # Cluster name, endpoint, OIDC issuer, etc.
     ├── provider.tf                    # AWS provider config
@@ -43,12 +43,12 @@ pkg/providers/cluster/gcp/          # Stub: emits a "(stub)" status message and 
 
 ## 6.3 AWS Root Module
 
-The AWS root module is intentionally thin. It is a single Terraform file that calls an immutable commit of the `terraform-aws-eks-cluster` module fork used for reviewed external-launch-template support:
+The AWS root module is intentionally thin. It is a single Terraform file that calls the temporary personal fork `github.com/nenb/terraform-aws-eks-cluster`, pinned at immutable full commit `c3017c0e15b538cd4e04c0786809a861ea82c621` for review of external-launch-template support:
 
 ```hcl
 # pkg/providers/cluster/aws/templates/main.tf
 module "eks_cluster" {
-  # Fork commit pinned immutably for exact external-launch-template support.
+  # Temporary personal-fork review pin; replace with an upstream immutable release when available.
   source = "git::https://github.com/nenb/terraform-aws-eks-cluster.git?ref=c3017c0e15b538cd4e04c0786809a861ea82c621"
 
   project_name                  = var.project_name
@@ -80,7 +80,7 @@ Templates are embedded into the NIC binary via Go's `embed.FS` declared inside `
 2. Calls `pkg/tofu.Setup(ctx, templatesFS, tfvars)`, which extracts the embedded files into a fresh temp directory, downloads the OpenTofu binary if not cached, writes `terraform.tfvars.json`, and returns a `TerraformExecutor`.
 3. Calls `Init`, `Plan` (or `Apply`/`Destroy`) and lets `pkg/tofu` stream JSON output through the status channel.
 
-There is no in-tree EKS HCL, no in-tree node group resources, and no in-tree IAM HCL beyond what the external module provides. The fork commit is based on v0.7.0 and is pinned by its full Git SHA rather than a mutable branch or tag. The intent remains to leverage the established module rather than maintaining a parallel implementation.
+There is no in-tree EKS HCL, no in-tree node group resources, and no in-tree IAM HCL beyond what the external module provides. This temporary personal-fork review commit is based on v0.7.0 and is pinned by its full Git SHA rather than a mutable branch, tag, or registry version. The intent remains to leverage the established module rather than maintaining a parallel implementation.
 
 ## 6.5 Non-AWS Providers (Brief)
 

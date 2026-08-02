@@ -19,6 +19,11 @@ domain: nebari.example.com
 cluster:
   aws:
     region: us-west-2
+    node_groups:
+      user:
+        instance: m7i.xlarge
+        min_nodes: 1
+        max_nodes: 3
 
 certificate:
   type: existing

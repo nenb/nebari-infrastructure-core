@@ -35,13 +35,6 @@ func TestValidateExternalLaunchTemplate(t *testing.T) {
 			nodeGroup: NodeGroup{Instance: "m7i.xlarge"},
 		},
 		{
-			name: "eight digit ID and positive version accepted",
-			nodeGroup: NodeGroup{
-				Instance:               "m8i.2xlarge",
-				ExternalLaunchTemplate: externalLaunchTemplate("lt-0123abcd", 1, "enabled"),
-			},
-		},
-		{
 			name: "seventeen digit ID accepted",
 			nodeGroup: NodeGroup{
 				Instance:               "m8i.2xlarge",
@@ -73,12 +66,20 @@ func TestValidateExternalLaunchTemplate(t *testing.T) {
 			wantError: "external_launch_template.id",
 		},
 		{
+			name: "eight digit ID rejected",
+			nodeGroup: NodeGroup{
+				Instance:               "m8i.2xlarge",
+				ExternalLaunchTemplate: externalLaunchTemplate("lt-0123abcd", 7, "enabled"),
+			},
+			wantError: "must match ^lt-[0-9a-f]{17}$",
+		},
+		{
 			name: "ID too short rejected",
 			nodeGroup: NodeGroup{
 				Instance:               "m8i.2xlarge",
 				ExternalLaunchTemplate: externalLaunchTemplate("lt-0123abc", 7, "enabled"),
 			},
-			wantError: "must match ^lt-[0-9a-f]{8,17}$",
+			wantError: "must match ^lt-[0-9a-f]{17}$",
 		},
 		{
 			name: "ID too long rejected",
@@ -86,7 +87,7 @@ func TestValidateExternalLaunchTemplate(t *testing.T) {
 				Instance:               "m8i.2xlarge",
 				ExternalLaunchTemplate: externalLaunchTemplate("lt-0123456789abcdef01", 7, "enabled"),
 			},
-			wantError: "must match ^lt-[0-9a-f]{8,17}$",
+			wantError: "must match ^lt-[0-9a-f]{17}$",
 		},
 		{
 			name: "uppercase ID rejected",

@@ -88,6 +88,14 @@ func (c *Client) Deploy(ctx context.Context, cfg *config.NebariConfig, opts Depl
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
+	// Provider-specific semantic validation must remain offline and run before
+	// DNS validation, TLS file reads, credential loading, or provisioning.
+	clusterProvider, err := validateClusterProviderOffline(ctx, cfg, reg)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
 	// Offline DNS provider validation (zone consistency), so a missing
 	// domain/zone_name or a domain outside the zone fails before any
 	// infrastructure is provisioned.
@@ -115,16 +123,6 @@ func (c *Client) Deploy(ctx context.Context, cfg *config.NebariConfig, opts Depl
 		span.SetAttributes(attribute.String("timeout", opts.Timeout.String()))
 		status.Send(ctx, status.NewUpdate(status.LevelInfo, "Using custom timeout").
 			WithMetadata("timeout", opts.Timeout.String()))
-	}
-
-	// Get the appropriate provider
-	clusterProvider, err := reg.ClusterProviders.Get(ctx, cfg.Cluster.ProviderName())
-	if err != nil {
-		span.RecordError(err)
-		status.Send(ctx, status.NewUpdate(status.LevelError, "Failed to get provider").
-			WithMetadata("provider", cfg.Cluster.ProviderName()).
-			WithMetadata("error", err.Error()))
-		return nil, fmt.Errorf("get cluster provider %q: %w", cfg.Cluster.ProviderName(), err)
 	}
 
 	status.Send(ctx, status.NewUpdate(status.LevelInfo, "Provider selected").

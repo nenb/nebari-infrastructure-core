@@ -80,7 +80,7 @@ The specific commit dates for the 2026 entries can be reconstructed from git his
 - [cert-manager Documentation](https://cert-manager.io/docs/)
 - [Envoy Gateway](https://gateway.envoyproxy.io/)
 - [`nebari-dev/nebari-operator`](https://github.com/nebari-dev/nebari-operator) - out-of-tree operator that reconciles `NebariApp` CRs
-- `nebari-dev/eks-cluster/aws` v0.6.0 (OpenTofu Registry) - upstream Terraform module used by NIC's AWS provider; see `pkg/providers/cluster/aws/templates/main.tf`
+- [`github.com/nenb/terraform-aws-eks-cluster`](https://github.com/nenb/terraform-aws-eks-cluster) at commit `c3017c0e15b538cd4e04c0786809a861ea82c621` - temporary personal-fork review pin used by NIC's AWS provider for explicit external launch templates; it is pinned by the immutable full SHA, not a branch, tag, or registry version; see `pkg/providers/cluster/aws/templates/main.tf`
 - `nebari-dev/aks-cluster/azurerm` v0.1.1 (OpenTofu Registry) - upstream Terraform module used by NIC's Azure provider; see `pkg/providers/cluster/azure/templates/main.tf`
 - [`hetzner-k3s`](https://github.com/vitobotta/hetzner-k3s) - binary used by NIC's Hetzner provider
 - [ADR-0004: Out-of-Tree Provider Plugin Architecture](../../adr/0004-out-of-tree-provider-plugins.md)

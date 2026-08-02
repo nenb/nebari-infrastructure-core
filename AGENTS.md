@@ -21,7 +21,7 @@ More categories (certificate issuers, git hosting, software installers) are plan
 
 | Provider | Backing tool | Status |
 | --- | --- | --- |
-| `aws` | OpenTofu, using the [`terraform-aws-eks-cluster`](https://github.com/nebari-dev/terraform-aws-eks-cluster) module with `.tf` templates embedded under `pkg/providers/cluster/aws/templates/` and driven via `terraform-exec` | Primary, in active use |
+| `aws` | OpenTofu, temporarily using the personal fork [`nenb/terraform-aws-eks-cluster`](https://github.com/nenb/terraform-aws-eks-cluster) pinned for review at full commit `c3017c0e15b538cd4e04c0786809a861ea82c621`, with `.tf` templates embedded under `pkg/providers/cluster/aws/templates/` and driven via `terraform-exec` | Primary, in active use |
 | `hetzner` | [`hetzner-k3s`](https://github.com/vitobotta/hetzner-k3s) binary; NIC downloads and caches a pinned release with checksum verification | Active development |
 | `existing` | Bring-your-own kubeconfig context. Validates an existing context; performs no provisioning | Working |
 | `local` | Kind. `nic deploy` creates the Kind cluster (reusing it if one already exists) and bootstraps it; `nic destroy` deletes it | Working |
@@ -161,6 +161,8 @@ type Provider interface {
     InfraSettings(*config.ClusterConfig) InfraSettings
 }
 ```
+
+Providers may also implement the optional `cluster.OfflineValidator` interface. `nic.Client.Validate` and `nic.Client.Deploy` invoke `ValidateOffline` before TLS resolution, credentials, or provisioning; implementations must perform complete provider-specific semantic validation without network, filesystem, credential, subprocess, or cluster I/O.
 
 `InfraSettings` describes Kubernetes-level capabilities the rest of NIC needs to know about. Current fields: `StorageClass`, `NeedsMetalLB`, `LoadBalancerAnnotations`, `MetalLBAddressPool`, `KeycloakBasePath`, `HTTPSPort`, `EFSStorageClass`, `SupportsLocalGitOps`.
 

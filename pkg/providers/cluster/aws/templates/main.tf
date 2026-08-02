@@ -1,4 +1,5 @@
 module "eks_cluster" {
+  # Temporary personal-fork review pin; replace with an upstream immutable release when available.
   source = "git::https://github.com/nenb/terraform-aws-eks-cluster.git?ref=c3017c0e15b538cd4e04c0786809a861ea82c621"
 
 

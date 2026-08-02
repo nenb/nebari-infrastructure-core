@@ -91,7 +91,7 @@ func validateTaints(nodeGroupName string, taints []Taint) error {
 	return nil
 }
 
-var externalLaunchTemplateIDPattern = regexp.MustCompile(`^lt-[0-9a-f]{8,17}$`)
+var externalLaunchTemplateIDPattern = regexp.MustCompile(`^lt-[0-9a-f]{17}$`)
 
 // validateExternalLaunchTemplate validates the complete caller-owned launch
 // template selection and its operator review. It deliberately performs no AWS
@@ -108,7 +108,7 @@ func validateExternalLaunchTemplate(ctx context.Context, nodeGroupName string, n
 		return nil
 	}
 	if !externalLaunchTemplateIDPattern.MatchString(launchTemplate.ID) {
-		err := fmt.Errorf("node group %s: external_launch_template.id must match ^lt-[0-9a-f]{8,17}$", nodeGroupName)
+		err := fmt.Errorf("node group %s: external_launch_template.id must match ^lt-[0-9a-f]{17}$", nodeGroupName)
 		span.RecordError(err)
 		return err
 	}
@@ -213,107 +213,119 @@ func extractAWSConfig(ctx context.Context, clusterConfig *config.ClusterConfig) 
 	return &awsCfg, nil
 }
 
-// Validate validates the AWS configuration with pre-flight checks
-func (p *Provider) Validate(ctx context.Context, projectName string, clusterConfig *config.ClusterConfig) error {
+// validateAWSConfigSemantics performs complete AWS config validation without
+// credentials, network calls, filesystem access, subprocesses, or cluster I/O.
+func validateAWSConfigSemantics(ctx context.Context, awsCfg *Config) error {
 	tracer := otel.Tracer("nebari-infrastructure-core")
-	ctx, span := tracer.Start(ctx, "aws.Validate")
+	ctx, span := tracer.Start(ctx, "aws.validateConfigSemantics")
 	defer span.End()
 
-	span.SetAttributes(
-		attribute.String("provider", ProviderName),
-		attribute.String("project_name", projectName),
-	)
-
-	// Extract and validate AWS configuration
-	awsCfg, err := extractAWSConfig(ctx, clusterConfig)
-	if err != nil {
-		span.RecordError(err)
-		return err
-	}
-
-	// Validate required fields
 	if awsCfg.Region == "" {
 		err := fmt.Errorf("AWS region is required")
 		span.RecordError(err)
 		return err
 	}
-
-	// Validate Kubernetes version format
-	if awsCfg.KubernetesVersion != "" {
-		// Basic validation - should be like "1.34", "1.29", etc.
-		if len(awsCfg.KubernetesVersion) < 3 {
-			err := fmt.Errorf("invalid Kubernetes version format: %s", awsCfg.KubernetesVersion)
-			span.RecordError(err)
-			return err
-		}
-	}
-
-	// Validate VPC CIDR block if specified
-	if awsCfg.VPCCIDRBlock != "" {
-		// Basic CIDR validation
-		if !containsSubstring([]string{awsCfg.VPCCIDRBlock}, "/") {
-			err := fmt.Errorf("invalid VPC CIDR block format: %s (must include /prefix)", awsCfg.VPCCIDRBlock)
-			span.RecordError(err)
-			return err
-		}
-	}
-
-	// Validate load_balancer_scheme if specified
-	if awsCfg.LoadBalancerScheme != "" && !contains(validLoadBalancerSchemes, awsCfg.LoadBalancerScheme) {
-		err := fmt.Errorf("invalid load_balancer_scheme %q (must be one of: %v)",
-			awsCfg.LoadBalancerScheme, validLoadBalancerSchemes)
+	if awsCfg.KubernetesVersion != "" && len(awsCfg.KubernetesVersion) < 3 {
+		err := fmt.Errorf("invalid Kubernetes version format: %s", awsCfg.KubernetesVersion)
 		span.RecordError(err)
 		return err
 	}
-
-	// Validate node groups
+	if awsCfg.VPCCIDRBlock != "" && !containsSubstring([]string{awsCfg.VPCCIDRBlock}, "/") {
+		err := fmt.Errorf("invalid VPC CIDR block format: %s (must include /prefix)", awsCfg.VPCCIDRBlock)
+		span.RecordError(err)
+		return err
+	}
+	if awsCfg.LoadBalancerScheme != "" && !contains(validLoadBalancerSchemes, awsCfg.LoadBalancerScheme) {
+		err := fmt.Errorf("invalid load_balancer_scheme %q (must be one of: %v)", awsCfg.LoadBalancerScheme, validLoadBalancerSchemes)
+		span.RecordError(err)
+		return err
+	}
 	if len(awsCfg.NodeGroups) == 0 {
 		err := fmt.Errorf("at least one node group is required")
 		span.RecordError(err)
 		return err
 	}
-
 	for nodeGroupName, nodeGroup := range awsCfg.NodeGroups {
-		// Validate instance type is specified
 		if nodeGroup.Instance == "" {
 			err := fmt.Errorf("node group %s: instance type is required", nodeGroupName)
 			span.RecordError(err)
 			return err
 		}
-
-		// Validate scaling configuration
 		if nodeGroup.MinNodes < 0 {
 			err := fmt.Errorf("node group %s: min_nodes cannot be negative", nodeGroupName)
 			span.RecordError(err)
 			return err
 		}
-
 		if nodeGroup.MaxNodes < 0 {
 			err := fmt.Errorf("node group %s: max_nodes cannot be negative", nodeGroupName)
 			span.RecordError(err)
 			return err
 		}
-
 		if nodeGroup.MinNodes > 0 && nodeGroup.MaxNodes > 0 && nodeGroup.MinNodes > nodeGroup.MaxNodes {
 			err := fmt.Errorf("node group %s: min_nodes (%d) cannot be greater than max_nodes (%d)", nodeGroupName, nodeGroup.MinNodes, nodeGroup.MaxNodes)
 			span.RecordError(err)
 			return err
 		}
-
-		// Validate any external launch template before loading AWS credentials.
 		if err := validateExternalLaunchTemplate(ctx, nodeGroupName, nodeGroup); err != nil {
 			span.RecordError(err)
 			return err
 		}
-
-		// Validate taints
 		if err := validateTaints(nodeGroupName, nodeGroup.Taints); err != nil {
 			span.RecordError(err)
 			return err
 		}
 	}
+	return nil
+}
 
-	// Validate AWS credentials
+// extractValidatedAWSConfig returns a typed AWS config only after all no-I/O
+// semantic validation has passed.
+func extractValidatedAWSConfig(ctx context.Context, clusterConfig *config.ClusterConfig) (*Config, error) {
+	tracer := otel.Tracer("nebari-infrastructure-core")
+	ctx, span := tracer.Start(ctx, "aws.extractValidatedConfig")
+	defer span.End()
+
+	awsCfg, err := extractAWSConfig(ctx, clusterConfig)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	if err := validateAWSConfigSemantics(ctx, awsCfg); err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return awsCfg, nil
+}
+
+// ValidateOffline implements cluster.OfflineValidator. It performs complete
+// provider-specific validation without credentials or any other I/O.
+func (p *Provider) ValidateOffline(ctx context.Context, projectName string, clusterConfig *config.ClusterConfig) error {
+	tracer := otel.Tracer("nebari-infrastructure-core")
+	ctx, span := tracer.Start(ctx, "aws.ValidateOffline")
+	defer span.End()
+
+	span.SetAttributes(attribute.String("provider", ProviderName), attribute.String("project_name", projectName))
+	_, err := extractValidatedAWSConfig(ctx, clusterConfig)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+// Validate validates AWS configuration offline, then checks credentials.
+func (p *Provider) Validate(ctx context.Context, projectName string, clusterConfig *config.ClusterConfig) error {
+	tracer := otel.Tracer("nebari-infrastructure-core")
+	ctx, span := tracer.Start(ctx, "aws.Validate")
+	defer span.End()
+
+	span.SetAttributes(attribute.String("provider", ProviderName), attribute.String("project_name", projectName))
+
+	awsCfg, err := extractValidatedAWSConfig(ctx, clusterConfig)
+	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+
 	sdkCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(awsCfg.Region))
 	if err != nil {
 		span.RecordError(err)
@@ -324,11 +336,7 @@ func (p *Provider) Validate(ctx context.Context, projectName string, clusterConf
 		return fmt.Errorf("failed to retrieve AWS credentials: %w", err)
 	}
 
-	span.SetAttributes(
-		attribute.Bool("validation_passed", true),
-		attribute.String("aws.region", awsCfg.Region),
-	)
-
+	span.SetAttributes(attribute.Bool("validation_passed", true), attribute.String("aws.region", awsCfg.Region))
 	return nil
 }
 
@@ -344,8 +352,9 @@ func (p *Provider) Deploy(ctx context.Context, projectName string, clusterConfig
 		attribute.Bool("dry_run", opts.DryRun),
 	)
 
-	// Extract AWS configuration
-	awsCfg, err := extractAWSConfig(ctx, clusterConfig)
+	// Defensively repeat complete offline semantics before any state-bucket or
+	// other AWS operation, even when callers bypass nic.Client preflight.
+	awsCfg, err := extractValidatedAWSConfig(ctx, clusterConfig)
 	if err != nil {
 		span.RecordError(err)
 		return err
