@@ -93,6 +93,23 @@ cluster:
       #   min_nodes: 0
       #   max_nodes: 5
       #
+      # # Example: caller-owned launch template for nested virtualization.
+      # # NIC passes this exact immutable ID/version selection through; it does
+      # # not query AWS or verify the operator_review assertion. The template
+      # # must omit subnet, IAM instance profile, instance type, and AMI image ID.
+      # # It owns security groups, user data, bootstrap, and block devices, so
+      # # disk_size cannot be set here and NIC's extra_ca_bundle is not injected.
+      # cogs:
+      #   instance: m8i.2xlarge
+      #   min_nodes: 1
+      #   max_nodes: 3
+      #   external_launch_template:
+      #     id: lt-0123456789abcdef0
+      #     version: 7 # positive integer only; no $Latest or $Default
+      #     operator_review:
+      #       cpu_options:
+      #         nested_virtualization: enabled # exact, case-sensitive attestation
+      #
       # # Example: GPU node group with AL2023 NVIDIA AMI
       # gpu:
       #   instance: g5.xlarge

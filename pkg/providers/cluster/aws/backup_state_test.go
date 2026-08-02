@@ -7,29 +7,43 @@ import (
 	"github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/cluster"
 )
 
-// eksClusterModulePin extracts the version pinned for the eks_cluster module
-// call. `\s+` spans the newline between the source and version lines.
-var eksClusterModulePin = regexp.MustCompile(`source\s*=\s*"nebari-dev/eks-cluster/aws"\s+version\s*=\s*"([^"]+)"`)
+var (
+	eksClusterModuleCommitPin = regexp.MustCompile(`source\s*=\s*"git::https://github\.com/nenb/terraform-aws-eks-cluster\.git\?ref=([0-9a-f]{40})"`)
+	moduleVersionConstraint   = regexp.MustCompile(`(?m)^\s*version\s*=`)
+)
 
-// TestBackupStateAddrsVerifiedAgainstPinnedModule fails on every
-// terraform-aws-eks-cluster bump, on purpose: backupStateAddrs is a hardcoded
-// list that only a human re-running `tofu graph` against the new module
-// version can re-verify, and a stale list silently destroys the backups
-// retain_on_destroy promised to keep. TestBackupStateAddrs cannot catch that —
-// it compares the list to itself. On a bump: re-verify the five addresses
-// against the new module, then update backupStateModuleVersion.
-func TestBackupStateAddrsVerifiedAgainstPinnedModule(t *testing.T) {
+func TestEKSClusterModulePinnedToFullCommit(t *testing.T) {
 	mainTF, err := tofuTemplates.ReadFile("templates/main.tf")
 	if err != nil {
 		t.Fatalf("read embedded templates/main.tf: %v", err)
 	}
-	m := eksClusterModulePin.FindSubmatch(mainTF)
-	if m == nil {
-		t.Fatal("templates/main.tf no longer pins nebari-dev/eks-cluster/aws with a literal version; update eksClusterModulePin and re-verify backupStateAddrs")
+	matches := eksClusterModuleCommitPin.FindSubmatch(mainTF)
+	if matches == nil {
+		t.Fatal("templates/main.tf must pin the forked terraform-aws-eks-cluster module with an immutable full Git SHA")
 	}
-	if got := string(m[1]); got != backupStateModuleVersion {
-		t.Fatalf("templates/main.tf pins terraform-aws-eks-cluster %s but backupStateAddrs was verified against %s; re-verify the state addresses against %s (tofu graph) and update backupStateModuleVersion",
-			got, backupStateModuleVersion, got)
+	if got := string(matches[1]); got != backupStateModuleCommit {
+		t.Fatalf("module source pins %s, want reviewed commit %s", got, backupStateModuleCommit)
+	}
+	if moduleVersionConstraint.Match(mainTF) {
+		t.Fatal("Git module source must not also use a registry version constraint")
+	}
+}
+
+// TestBackupStateAddrsBoundToPinnedModuleCommit fails on every module pin
+// change. The addresses were graph-verified at v0.7.0; for the current commit,
+// the v0.7.0 source diff was reviewed and contains no Longhorn resource or
+// module-nesting changes. No graph execution is claimed for the fork commit.
+func TestBackupStateAddrsBoundToPinnedModuleCommit(t *testing.T) {
+	mainTF, err := tofuTemplates.ReadFile("templates/main.tf")
+	if err != nil {
+		t.Fatalf("read embedded templates/main.tf: %v", err)
+	}
+	matches := eksClusterModuleCommitPin.FindSubmatch(mainTF)
+	if matches == nil {
+		t.Fatal("templates/main.tf does not contain the expected full-SHA module source; review backupStateAddrs before changing the pin")
+	}
+	if got := string(matches[1]); got != backupStateModuleCommit {
+		t.Fatalf("module source pins %s but backupStateAddrs are source-reviewed against %s; review the module diff and update backupStateModuleCommit", got, backupStateModuleCommit)
 	}
 }
 

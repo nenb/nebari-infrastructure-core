@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sync"
 	"time"
 
@@ -90,6 +91,45 @@ func validateTaints(nodeGroupName string, taints []Taint) error {
 	return nil
 }
 
+var externalLaunchTemplateIDPattern = regexp.MustCompile(`^lt-[0-9a-f]{8,17}$`)
+
+// validateExternalLaunchTemplate validates the complete caller-owned launch
+// template selection and its operator review. It deliberately performs no AWS
+// lookup: the review is a configuration attestation, not cloud observation.
+func validateExternalLaunchTemplate(ctx context.Context, nodeGroupName string, nodeGroup NodeGroup) error {
+	tracer := otel.Tracer("nebari-infrastructure-core")
+	_, span := tracer.Start(ctx, "aws.validateExternalLaunchTemplate")
+	defer span.End()
+
+	span.SetAttributes(attribute.String("aws.node_group", nodeGroupName))
+
+	launchTemplate := nodeGroup.ExternalLaunchTemplate
+	if launchTemplate == nil {
+		return nil
+	}
+	if !externalLaunchTemplateIDPattern.MatchString(launchTemplate.ID) {
+		err := fmt.Errorf("node group %s: external_launch_template.id must match ^lt-[0-9a-f]{8,17}$", nodeGroupName)
+		span.RecordError(err)
+		return err
+	}
+	if launchTemplate.Version <= 0 {
+		err := fmt.Errorf("node group %s: external_launch_template.version must be a positive integer", nodeGroupName)
+		span.RecordError(err)
+		return err
+	}
+	if launchTemplate.OperatorReview.CPUOptions.NestedVirtualization != "enabled" {
+		err := fmt.Errorf("node group %s: external_launch_template.operator_review.cpu_options.nested_virtualization must be exactly %q", nodeGroupName, "enabled")
+		span.RecordError(err)
+		return err
+	}
+	if nodeGroup.DiskSize != nil {
+		err := fmt.Errorf("node group %s: disk_size cannot be set with external_launch_template; disk settings are owned by the external launch template", nodeGroupName)
+		span.RecordError(err)
+		return err
+	}
+	return nil
+}
+
 // containsSubstring checks if any string in the slice contains the substring
 func containsSubstring(slice []string, substr string) bool {
 	for _, s := range slice {
@@ -124,6 +164,44 @@ func extractAWSConfig(ctx context.Context, clusterConfig *config.ClusterConfig) 
 		err := fmt.Errorf("AWS configuration is required")
 		span.RecordError(err)
 		return nil, err
+	}
+
+	// Provider config first lands in map[string]any. Check the original YAML
+	// scalar type before unmarshalling because the YAML decoder otherwise coerces
+	// quoted and fractional numbers into an int64 field. Launch-template aliases
+	// and all other non-integer selections must be rejected, not normalized.
+	if nodeGroups, ok := rawCfg["node_groups"].(map[string]any); ok {
+		for nodeGroupName, rawNodeGroup := range nodeGroups {
+			nodeGroup, ok := rawNodeGroup.(map[string]any)
+			if !ok {
+				continue
+			}
+			rawLaunchTemplate, exists := nodeGroup["external_launch_template"]
+			if !exists {
+				continue
+			}
+			if rawLaunchTemplate == nil {
+				err := fmt.Errorf("node group %s: external_launch_template must be a non-empty mapping when specified", nodeGroupName)
+				span.RecordError(err)
+				return nil, err
+			}
+			launchTemplate, ok := rawLaunchTemplate.(map[string]any)
+			if !ok {
+				continue
+			}
+			version, exists := launchTemplate["version"]
+			if !exists || version == nil {
+				continue
+			}
+			switch version.(type) {
+			case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+				// Integer YAML scalar; semantic positivity is checked after decoding.
+			default:
+				err := fmt.Errorf("node group %s: external_launch_template.version must be an unquoted integer", nodeGroupName)
+				span.RecordError(err)
+				return nil, err
+			}
+		}
 	}
 
 	var awsCfg Config
@@ -218,6 +296,12 @@ func (p *Provider) Validate(ctx context.Context, projectName string, clusterConf
 
 		if nodeGroup.MinNodes > 0 && nodeGroup.MaxNodes > 0 && nodeGroup.MinNodes > nodeGroup.MaxNodes {
 			err := fmt.Errorf("node group %s: min_nodes (%d) cannot be greater than max_nodes (%d)", nodeGroupName, nodeGroup.MinNodes, nodeGroup.MaxNodes)
+			span.RecordError(err)
+			return err
+		}
+
+		// Validate any external launch template before loading AWS credentials.
+		if err := validateExternalLaunchTemplate(ctx, nodeGroupName, nodeGroup); err != nil {
 			span.RecordError(err)
 			return err
 		}

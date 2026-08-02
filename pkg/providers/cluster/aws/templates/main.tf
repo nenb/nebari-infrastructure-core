@@ -1,6 +1,5 @@
 module "eks_cluster" {
-  source  = "nebari-dev/eks-cluster/aws"
-  version = "0.7.0"
+  source = "git::https://github.com/nenb/terraform-aws-eks-cluster.git?ref=c3017c0e15b538cd4e04c0786809a861ea82c621"
 
 
   project_name                             = var.project_name

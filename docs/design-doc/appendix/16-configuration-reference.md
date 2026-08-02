@@ -126,6 +126,12 @@ cluster:
         # gpu: true                            # AL2023_x86_64_NVIDIA AMI + auto nvidia.com/gpu taint
         # spot: true
         # disk_size: 100
+        # external_launch_template:              # optional caller-owned LT
+        #   id: lt-0123456789abcdef0              # exact ID, 8-17 lowercase hex digits
+        #   version: 7                            # positive integer; aliases rejected
+        #   operator_review:
+        #     cpu_options:
+        #       nested_virtualization: enabled    # exact, case-sensitive attestation
         # labels:
         #   workload: user
         # taints:
@@ -165,6 +171,8 @@ cluster:
     #   dedicated_nodes: false
     #   node_selector: { node.longhorn.io/storage: "true" }
 ```
+
+**External launch templates:** `external_launch_template` selects one caller-owned launch template by exact ID and immutable positive integer version. `$Latest`, `$Default`, strings, zero, negative values, partial/empty objects, IDs outside `^lt-[0-9a-f]{8,17}$`, and values other than exact lowercase `enabled` are rejected before AWS credential retrieval. `operator_review` is only the operator's configuration attestation that the selected version has `CpuOptions.NestedVirtualization=enabled`: NIC passes it through but performs no AWS lookup and does not claim to observe or verify the template. The external template must omit subnet, IAM instance profile, instance type, AMI image ID, instance-initiated shutdown behavior, and hibernation. It owns security groups, user data/bootstrap, and block devices; consequently `disk_size` conflicts with it and NIC's `extra_ca_bundle` is not injected into it. The operator owns the template lifecycle, permissions, EKS compatibility, connectivity, and retention of the pinned version. Omitting the block preserves module-managed launch-template behavior.
 
 **GPU node groups:** setting `gpu: true` selects the `AL2023_x86_64_NVIDIA` AMI and makes NIC automatically apply the taint `nvidia.com/gpu=true:NO_SCHEDULE`, so only pods that tolerate it schedule onto GPU nodes. The NVIDIA GPU Operator does not taint nodes itself; it only tolerates this taint on its own operands. To use a different value or effect, set an explicit `nvidia.com/gpu` taint in the node group's `taints` and NIC leaves it untouched.
 

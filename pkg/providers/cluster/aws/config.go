@@ -150,15 +150,36 @@ func (c *Config) ClusterAutoscalerImageTag() string {
 }
 
 type NodeGroup struct {
-	Instance string            `yaml:"instance" json:"instance"`
-	MinNodes int               `yaml:"min_nodes,omitempty" json:"min_nodes"`
-	MaxNodes int               `yaml:"max_nodes,omitempty" json:"max_nodes"`
-	GPU      bool              `yaml:"gpu,omitempty" json:"-"`
-	AMIType  *string           `yaml:"ami_type,omitempty" json:"ami_type,omitempty"`
-	Spot     bool              `yaml:"spot,omitempty" json:"spot"`
-	DiskSize *int              `yaml:"disk_size,omitempty" json:"disk_size,omitempty"`
-	Labels   map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	Taints   []Taint           `yaml:"taints,omitempty" json:"taints,omitempty"`
+	Instance               string                  `yaml:"instance" json:"instance"`
+	MinNodes               int                     `yaml:"min_nodes,omitempty" json:"min_nodes"`
+	MaxNodes               int                     `yaml:"max_nodes,omitempty" json:"max_nodes"`
+	GPU                    bool                    `yaml:"gpu,omitempty" json:"-"`
+	AMIType                *string                 `yaml:"ami_type,omitempty" json:"ami_type,omitempty"`
+	Spot                   bool                    `yaml:"spot,omitempty" json:"spot"`
+	DiskSize               *int                    `yaml:"disk_size,omitempty" json:"disk_size,omitempty"`
+	ExternalLaunchTemplate *ExternalLaunchTemplate `yaml:"external_launch_template,omitempty" json:"external_launch_template,omitempty"`
+	Labels                 map[string]string       `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Taints                 []Taint                 `yaml:"taints,omitempty" json:"taints,omitempty"`
+}
+
+// ExternalLaunchTemplate selects one exact, caller-owned EC2 launch-template
+// version. OperatorReview is an operator-supplied attestation about that pinned
+// version; NIC does not inspect or verify the launch template in AWS.
+type ExternalLaunchTemplate struct {
+	ID             string                       `yaml:"id" json:"id"`
+	Version        int64                        `yaml:"version" json:"version"`
+	OperatorReview ExternalLaunchTemplateReview `yaml:"operator_review" json:"operator_review"`
+}
+
+// ExternalLaunchTemplateReview records the configuration an operator reviewed
+// on the exact external launch-template ID and version.
+type ExternalLaunchTemplateReview struct {
+	CPUOptions ExternalLaunchTemplateCPUOptionsReview `yaml:"cpu_options" json:"cpu_options"`
+}
+
+// ExternalLaunchTemplateCPUOptionsReview records reviewed EC2 CpuOptions.
+type ExternalLaunchTemplateCPUOptionsReview struct {
+	NestedVirtualization string `yaml:"nested_virtualization" json:"nested_virtualization"`
 }
 
 type Taint struct {

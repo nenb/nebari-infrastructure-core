@@ -4,14 +4,15 @@ import (
 	"github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/cluster"
 )
 
-// backupStateModuleVersion is the terraform-aws-eks-cluster release the
-// addresses in backupStateAddrs were verified against (via `tofu graph` on the
-// real module). TestBackupStateAddrsVerifiedAgainstPinnedModule asserts it
-// matches the version pinned in templates/main.tf, so a module bump fails the
-// test and forces the addresses to be re-verified — a drifted address list is
-// otherwise silent and destroys the backups retain_on_destroy promised to keep
-// (cluster.RetainBackupResources warns but cannot fail the destroy).
-const backupStateModuleVersion = "0.7.0"
+// backupStateModuleCommit is the exact terraform-aws-eks-cluster commit whose
+// source was reviewed for the addresses in backupStateAddrs. The addresses were
+// originally verified with `tofu graph` at v0.7.0. Commit c3017c0 is based on
+// v0.7.0 and changes only variables, locals, an output, documentation, and the
+// static-test harness/CI; source review confirmed that it does not change
+// Longhorn resources or their module nesting. No tofu graph was run for this
+// commit. TestBackupStateAddrsBoundToPinnedModuleCommit makes any later pin
+// change fail until its effect on these safety-critical addresses is reviewed.
+const backupStateModuleCommit = "c3017c0e15b538cd4e04c0786809a861ea82c621"
 
 // backupStateAddrs returns the Terraform state addresses for a NIC-provisioned
 // Longhorn backup S3 bucket that must be removed from state before `tofu
@@ -35,9 +36,8 @@ func backupStateAddrs(spec *cluster.BackupBucketSpec) []string {
 	// indices; if either ever moves to `for_each`, these addresses (e.g. [0] ->
 	// ["<key>"]) must be updated to match.
 	//
-	// Verified against terraform-aws-eks-cluster backupStateModuleVersion; the
-	// test tying that constant to templates/main.tf forces re-verification on
-	// every module bump.
+	// Bound to terraform-aws-eks-cluster backupStateModuleCommit; the test tying
+	// that constant to templates/main.tf forces review on every module pin change.
 	return []string{
 		"module.eks_cluster.module.longhorn_backup[0].aws_s3_bucket_public_access_block.this[0]",
 		"module.eks_cluster.module.longhorn_backup[0].aws_s3_bucket_server_side_encryption_configuration.this[0]",
