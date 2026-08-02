@@ -217,7 +217,7 @@ func extractAWSConfig(ctx context.Context, clusterConfig *config.ClusterConfig) 
 // credentials, network calls, filesystem access, subprocesses, or cluster I/O.
 func validateAWSConfigSemantics(ctx context.Context, awsCfg *Config) error {
 	tracer := otel.Tracer("nebari-infrastructure-core")
-	ctx, span := tracer.Start(ctx, "aws.validateConfigSemantics")
+	ctx, span := tracer.Start(ctx, "aws.validateAWSConfigSemantics")
 	defer span.End()
 
 	if awsCfg.Region == "" {
@@ -282,7 +282,7 @@ func validateAWSConfigSemantics(ctx context.Context, awsCfg *Config) error {
 // semantic validation has passed.
 func extractValidatedAWSConfig(ctx context.Context, clusterConfig *config.ClusterConfig) (*Config, error) {
 	tracer := otel.Tracer("nebari-infrastructure-core")
-	ctx, span := tracer.Start(ctx, "aws.extractValidatedConfig")
+	ctx, span := tracer.Start(ctx, "aws.extractValidatedAWSConfig")
 	defer span.End()
 
 	awsCfg, err := extractAWSConfig(ctx, clusterConfig)
