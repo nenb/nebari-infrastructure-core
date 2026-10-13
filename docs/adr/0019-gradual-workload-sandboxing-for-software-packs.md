@@ -27,15 +27,19 @@ Today NIC offers none of these, and pack developers cannot add them themselves: 
 | 3. AppArmor | On AppArmor nodes the default container profile denies `mount`. PSS Baseline forbids `Unconfined`. | Cluster-wide |
 | 4. Masked `/proc` | The kernel refuses a fresh procfs mount inside a container with masked `/proc` paths. Lifted by pod user namespaces + `procMount: Unmasked`. | Cluster versions (Kubernetes, containerd, kernel) |
 
-Where the providers stand on these layers:
+Where the providers stand on these layers. Entries marked *(unverified)* are inferred from the node image's defaults, not from running a sandboxing tool on a NIC-deployed cluster:
 
-| Provider | Layer 1 | Layer 3 | Layer 4 (pod user namespaces) |
-|---|---|---|---|
-| `aws` (AL2023) | Expected OK; no AppArmor | n/a | Depends on AMI kernel/containerd; to verify |
-| `hetzner` (hetzner-k3s, Ubuntu 24.04) | Blocked by the AppArmor sysctl | Profile needed | Example config pins Kubernetes 1.32 |
-| `azure` (AKS, Ubuntu 22.04) | Expected OK | Profile needed | 5.15 kernel; likely unsupported |
-| `local` (kind) | Host-dependent | To verify | Host-dependent |
-| `existing` | Unknown | Unknown | Unknown; detect only |
+| Provider | Layer 1 (node kernel) | Layer 2 (seccomp) | Layer 3 (AppArmor) | Layer 4 (pod user namespaces) |
+|---|---|---|---|---|
+| `aws` (AL2023) | Expected OK *(unverified)* | Blocked under `RuntimeDefault`; profile needed | n/a (no AppArmor) | Depends on AMI kernel/containerd *(unverified)* |
+| `hetzner` (hetzner-k3s, Ubuntu 24.04) | Blocked by the AppArmor sysctl | Blocked under `RuntimeDefault`; profile needed | Profile needed | Example config pins Kubernetes 1.32 |
+| `azure` (AKS, Ubuntu 22.04) | Expected OK *(unverified)* | Blocked under `RuntimeDefault`; profile needed | Profile needed | 5.15 kernel; likely unsupported *(unverified)* |
+| `local` (kind) | Host-dependent | Blocked under `RuntimeDefault`; profile needed | To verify | Host-dependent |
+| `existing` | Unknown | Blocked under `RuntimeDefault`; profile needed | Unknown | Unknown; detect only |
+
+Layer 2 is the same on every provider, so most of the work below is provider-neutral; only layer 1 (and layer 3 on AppArmor nodes) needs provider-specific changes.
+
+**Why it can appear to work today.** No pack in `PACKS/` sets a seccomp profile, and neither does the bundled JupyterHub chart. A pod with no seccomp profile gets the kubelet's default, which is no filter at all (`Unconfined`) unless the kubelet's `seccompDefault` option is enabled. So on a node where layer 1 already passes (e.g. AWS), a user pod may run bubblewrap today in its reuse-`/proc` mode. This is not a foundation packs can rely on: it depends on running with no syscall filter, it stops working as soon as a pack follows Pod Security Standards `restricted` (which requires `RuntimeDefault` or `Localhost`) or the kubelet's `seccompDefault` is enabled, and ADR-0010's hardened mode is expected to forbid it.
 
 ## Decision Drivers
 
@@ -170,6 +174,8 @@ Kept as a planned `runtime-class:<name>` capability rather than the starting poi
 - How does AppArmor apply to pods on kind nodes?
 - Does hetzner-k3s v2.4.6 support per-pool pre-k3s commands, or only global ones?
 - Is a per-node-group flag the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
+- Does the EKS (AL2023/nodeadm) default kubelet configuration enable `seccompDefault`? Same question for k3s and AKS. This decides whether pods without an explicit profile are filtered today.
+- Confirm every *(unverified)* entry in the provider table by running the probe described above on each provider.
 - Should capability names be versioned (e.g. `in-pod-namespaces/v1`) so a guarantee can be tightened later without silently changing its meaning?
 
 ## Links
