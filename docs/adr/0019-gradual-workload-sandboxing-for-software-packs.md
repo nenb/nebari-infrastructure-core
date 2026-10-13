@@ -12,13 +12,33 @@ Proposed (DRAFT)
 
 Software packs increasingly run code on a user's behalf that the user did not write line by line: coding agents (the Pi pack), notebook extensions that execute tool calls, build steps, and similar. Pack developers want to contain that code, for example by confining an agent's shell commands to a project directory with no network and no access to the pod's service-account token.
 
-There is no single right way to do this, and the options differ in strength, cost and what they need from the cluster:
+There is no single right way to do this. The options form a spectrum that differs in strength, cost, what code they can run, and what they need from the cluster.
 
-- **In-pod sandboxing tools** ([bubblewrap](https://github.com/containers/bubblewrap), nsjail, rootless podman/buildah, `unshare`) create Linux namespaces for a single command inside the user's existing pod. Cheap and fast; share the host kernel.
-- **Pod user namespaces** (`hostUsers: false`, [GA in Kubernetes 1.36](https://kubernetes.io/blog/2026/04/23/kubernetes-v1-36-userns-ga/)) make root in the pod an unprivileged user on the host, and let in-pod tools mount a fresh `/proc`.
-- **VM-grade runtimes** (gVisor, Kata, e.g. through [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/)) put the whole pod behind a separate kernel boundary. Strongest, but costly and provider-specific.
+### The sandboxing spectrum
 
-Today NIC offers none of these, and pack developers cannot add them themselves: the deciding settings live on the nodes and in cluster-wide security profiles, not in a pack's chart. Concretely, an in-pod sandboxing tool fails in a NIC-deployed pod because four layers block unprivileged namespace creation:
+| # | Option | Examples | What isolates the code | Cluster changes needed | Main limits | Place in this ADR |
+|---|---|---|---|---|---|---|
+| 1 | Language runtime | WASM (wasmtime, WASI), V8 isolates, Deno with permission flags, Pyodide | The runtime: code can only do what the runtime exposes | None | Runs only code built for that runtime; no arbitrary binaries, shells, `pip install` or `git` | Packs can do this today |
+| 1b | The user's own browser | JupyterLite, Pyodide or WebContainers on the client side | The browser sandbox, on the user's machine | None; the cluster is not involved | As row 1; nothing runs on the platform | Packs can do this today |
+| 2 | Process self-restriction | Landlock plus seccomp (e.g. the approach taken by OpenAI's Codex CLI on Linux) | The process drops its own filesystem and network rights before running a command | Expected none: containerd's default seccomp profile allows the Landlock syscalls; the node kernel must be >= 5.13 with Landlock enabled *(unverified per provider)* | Covers filesystem and TCP network access, not process visibility or IPC | Packs can likely do this today |
+| 3 | Namespace sandbox in the pod | bubblewrap, nsjail, minijail, rootless podman/buildah | Linux namespaces inside the pod, on the shared host kernel | Yes: node prep and security profiles (the four layers below) | Shares the host kernel; extra kernel attack surface from user namespaces | **`in-pod-namespaces`, this ADR** |
+| 3b | Headless browser in the pod | Chromium/Playwright running untrusted pages or scripts | Chromium's own sandbox, which also uses user namespaces | Same as row 3, otherwise it runs with `--no-sandbox` | As row 3 | Covered by `in-pod-namespaces` |
+| 4 | Separate locked-down pod per task | A Job or Agent Sandbox `Sandbox` with the default runtime: no service-account token, NetworkPolicy, read-only root, optionally `hostUsers: false` | Standard container isolation, on the shared host kernel | None for the basic form; `hostUsers: false` needs recent Kubernetes, containerd and kernel | Start-up latency; the pack needs RBAC to create pods; still a shared kernel | Basic form: packs can do this today. With `hostUsers: false`: `pod-user-namespaces`, follow-up |
+| 5 | User-space kernel | gVisor (`runsc`) | gVisor implements the Linux syscall interface itself; the workload never calls the host kernel directly | Yes: install the runtime and a `RuntimeClass` (built into some managed offerings, otherwise installed per provider) | I/O and syscall overhead; some applications are incompatible | `runtime-class:gvisor`, follow-up |
+| 6 | MicroVM per pod | Kata Containers, Firecracker, Cloud Hypervisor | Hardware virtualisation with a separate guest kernel | Yes: runtime install, and nodes that expose `/dev/kvm` (bare metal, or instance types with nested virtualisation) | More memory per pod, slower start; usually a dedicated KVM-capable node group | `runtime-class:kata`, follow-up |
+| 7 | Dedicated node or cluster | Per-tenant node pools, a separate cluster, confidential VMs | A separate machine | Yes: provisioning | Cost | Out of scope |
+| 8 | External sandbox service | Hosted code-execution services (several are Firecracker-based) | Someone else's infrastructure | None in the cluster; outbound network and credentials only | Data leaves the environment; vendor dependency | Packs can do this today |
+
+Two points the table makes explicit:
+
+- **Several options need nothing from NIC** (rows 1, 1b, 2, 4 in its basic form, and 8). This ADR is not a precondition for sandboxing in general; it addresses the band where pack developers are blocked by settings only the cluster can change.
+- **Isolation strength is only part of the picture.** In every row, outbound network policy, which credentials are visible to the sandboxed code (service-account token, cloud IAM, Git tokens), resource limits and filesystem write access usually matter as much as the isolation tier. A VM with cloud credentials mounted is weaker in practice than a namespace sandbox without them.
+
+This ADR delivers row 3 and defines how rows 4-6 are added later.
+
+### Why row 3 needs NIC
+
+Pack developers cannot enable row 3 themselves: the deciding settings live on the nodes and in cluster-wide security profiles, not in a pack's chart. Concretely, an in-pod sandboxing tool fails in a NIC-deployed pod because four layers block unprivileged namespace creation:
 
 | Layer | What blocks it | Owner |
 |---|---|---|
@@ -56,21 +76,21 @@ Layer 2 is the same on every provider, so most of the work below is provider-neu
 1. Do nothing; packs that need sandboxing run privileged or with `Unconfined` profiles.
 2. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
 3. A tool-neutral, extensible sandbox capability contract, delivered one capability at a time, starting with in-pod unprivileged namespaces.
-4. Go straight to VM-grade isolation (gVisor/Kata `RuntimeClass`) as the only sandbox option.
+4. Go straight to a stronger-isolation runtime (gVisor or Kata `RuntimeClass`) as the only sandbox option.
 
 ## Decision Outcome
 
-Chosen option: "Option 3 - a tool-neutral, extensible sandbox capability contract, delivered incrementally", because it gives pack developers a usable primitive now (the one bubblewrap and similar tools need), defines a stable way to advertise stronger isolation as it lands, and does not tie NIC to a specific tool. Options 2 and 4 are not rejected outright: tool-specific guidance belongs in pack documentation, and VM-grade runtimes are a planned later capability under the same contract.
+Chosen option: "Option 3 - a tool-neutral, extensible sandbox capability contract, delivered incrementally", because it gives pack developers a usable primitive now (the one bubblewrap and similar tools need), defines a stable way to advertise stronger isolation as it lands, and does not tie NIC to a specific tool. Options 2 and 4 are not rejected outright: tool-specific guidance belongs in pack documentation, and gVisor- and Kata-backed runtimes are planned later capabilities under the same contract.
 
 ### The contract
 
-The cluster advertises a **set of sandbox capabilities**, not a single level, because the options are not strictly ordered (a VM-grade runtime is not a superset of in-pod namespaces). Packs ask for the capabilities they need; NIC refuses the deploy when the cluster cannot provide them.
+The cluster advertises a **set of sandbox capabilities**, not a single level, because the options are not strictly ordered (a gVisor or Kata runtime is not a superset of in-pod namespaces). Packs ask for the capabilities they need; NIC refuses the deploy when the cluster cannot provide them.
 
 | Capability | What a pack can rely on | Typical consumers | Delivered by |
 |---|---|---|---|
 | `in-pod-namespaces` | An unprivileged process in the pod can create user, mount, pid and network namespaces, with seccomp/AppArmor profiles that permit it. `/proc` is the container's own (tools bind it rather than mount a fresh one). | bubblewrap, nsjail, rootless podman/buildah, `unshare` | **This ADR** |
 | `pod-user-namespaces` | The pod may set `hostUsers: false` and `procMount: Unmasked`; in-pod tools can then mount a fresh `/proc`. | The same tools, in their full-isolation modes | Follow-up ADR (needs Kubernetes >= 1.36, kernel >= 6.3, containerd >= 2.0, no NFS volumes in the pod) |
-| `runtime-class:<name>` | A VM-grade `RuntimeClass` (gVisor, Kata) is installed and schedulable. | Untrusted, multi-tenant code; Agent Sandbox | Follow-up ADR |
+| `runtime-class:<name>` | A stronger-isolation `RuntimeClass` (gVisor, Kata) is installed and schedulable. | Untrusted, multi-tenant code; Agent Sandbox | Follow-up ADR |
 
 Capabilities may be added to this table by later ADRs without changing this one, as long as they keep the same shape (a name, a guarantee, how packs consume it).
 
@@ -152,7 +172,7 @@ Described above.
 - More moving parts (node-group flag, operator, probe, pack contract) than a one-off fix.
 - The contract has to be kept stable across later capabilities.
 
-### Option 4: VM-grade runtime only
+### Option 4: Stronger-isolation runtime only (gVisor or Kata)
 
 Provide only a `RuntimeClass` backed by gVisor or Kata, e.g. through `kubernetes-sigs/agent-sandbox`.
 
@@ -177,6 +197,7 @@ Kept as a planned `runtime-class:<name>` capability rather than the starting poi
 - Is a per-node-group flag the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
 - Do the k3s (hetzner-k3s) and AKS default kubelet configurations enable `seccompDefault`? This decides whether pods without an explicit profile are filtered today on those providers. (Resolved for EKS: not enabled; see Context.)
 - Confirm every *(unverified)* entry in the provider table by running the probe described above on each provider.
+- Is Landlock enabled in the node kernels of every provider (spectrum row 2)? If so, the ADR's pack documentation should point developers at it as the no-cluster-change option.
 - Should capability names be versioned (e.g. `in-pod-namespaces/v1`) so a guarantee can be tightened later without silently changing its meaning?
 
 ## Links
