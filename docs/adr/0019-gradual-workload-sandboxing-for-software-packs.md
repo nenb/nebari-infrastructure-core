@@ -10,7 +10,7 @@ Proposed (DRAFT). Revised 2026-10-14 after review: delivery is now phased, lifec
 
 ## Context
 
-Software packs increasingly run code on a user's behalf that the user did not write line by line: coding agents (the Pi pack), notebook extensions that execute tool calls, build steps, and similar. Pack developers want to contain that code, for example by confining an agent's shell commands to a project directory with no network and no access to the pod's service-account token.
+Software packs increasingly run code on a user's behalf that the user did not write line by line: coding agents, notebook extensions that execute tool calls, build steps, and similar. Pack developers want to contain that code, for example by confining an agent's shell commands to a project directory with no network and no access to the pod's service-account token.
 
 There is no single right way to do this. The options form a spectrum that differs in strength, cost, what code it can run, and what it needs from the cluster. Several options need nothing from NIC. This ADR addresses the band where pack developers are blocked by settings only the cluster can change: process self-restriction (Landlock and seccomp) and namespace sandboxes inside the pod (bubblewrap and similar).
 
