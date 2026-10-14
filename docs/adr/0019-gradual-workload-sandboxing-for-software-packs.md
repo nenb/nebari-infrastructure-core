@@ -93,9 +93,17 @@ The cluster advertises a **set of sandbox capabilities**, not a single level, be
 | `in-pod-namespaces` | An unprivileged process in the pod can create user, mount, pid and network namespaces, with seccomp/AppArmor profiles that permit it. `/proc` is the container's own (tools bind it rather than mount a fresh one). | bubblewrap, nsjail, rootless podman/buildah, `unshare` | **This ADR** |
 | `pod-user-namespaces` | The pod may set `hostUsers: false` and `procMount: Unmasked`; in-pod tools can then mount a fresh `/proc`. | The same tools, in their full-isolation modes | Follow-up ADR (needs Kubernetes >= 1.36, kernel >= 6.3, containerd >= 2.0, no NFS volumes in the pod) |
 | `network-policy` | NetworkPolicies are enforced on the cluster. | Row 4 (pod-per-task), egress restriction for any sandbox | Defined by [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691); listed here only as a candidate for the same contract, to be agreed with that work |
-| `runtime-class:<name>` | A stronger-isolation `RuntimeClass` (gVisor, Kata) is installed and schedulable. | Untrusted, multi-tenant code; Agent Sandbox | Follow-up ADR |
+| `runtime-class:<name>` | A stronger-isolation `RuntimeClass` (gVisor, Kata) exists and pods using it schedule and run on the node groups that advertise it. | Untrusted, multi-tenant code; Agent Sandbox | Follow-up ADR |
 
-Capabilities may be added to this table by later ADRs without changing this one, as long as they keep the same shape (a name, a guarantee, how packs consume it).
+Every capability, in this ADR or a later one, is defined by the same five things:
+
+- **Guarantee:** what a pack can rely on (the table above).
+- **Placement:** the node label that marks nodes providing it, whether its node groups are tainted, and therefore the node selector and tolerations a pod needs. Capabilities do not share one generic "sandbox node" label: a node group that allows unprivileged user namespaces and a dedicated, tainted node group that runs a VM-based runtime are different things.
+- **Node requirements:** anything the node itself must provide (a kernel setting, KVM access, a runtime binary). Where that needs provider-specific node-group settings, such as a custom launch template that enables nested virtualisation, those settings live in the provider's own node-group config, as `gpu` and `ami_type` do today. `InfraSettings` reports only the resulting capability.
+- **Provisioning:** what has to be installed and by whom. A capability is about what is advertised and verified, not who installed it: NIC may install the components as conditional foundational software, or a cluster administrator or a pack's cluster-scoped install may provide them. Either way, the probe below confirms it before it is advertised.
+- **Verification:** the probe that proves it, including in combination with other capabilities a pack requires.
+
+Capabilities may be added to this table by later ADRs without changing this one, as long as they define these five things.
 
 ### Scope of this ADR
 
@@ -107,20 +115,33 @@ This ADR decides the contract and delivers the first capability, `in-pod-namespa
 
 ### Delivering `in-pod-namespaces`
 
-1. **Opt-in per node group.** Each provider's node-group config gains an optional `sandbox: true`, next to `gpu`, `labels` and `taints`. NIC labels those nodes `nebari.dev/sandbox=true`. This mirrors the AWS `gpu: true` pattern and keeps the extra kernel surface off nodes running Keycloak, ArgoCD and other foundational services.
+1. **Opt-in per node group, by capability.** Each provider's node-group config gains an optional `sandbox` block naming the capabilities that node group provides, next to `gpu`, `labels` and `taints`:
+   ```yaml
+   node_groups:
+     agents:
+       sandbox:
+         capabilities: [in-pod-namespaces]
+   ```
+   NIC labels those nodes with one label per capability, derived from its name (here `sandbox.nebari.dev/in-pod-namespaces: "true"`; characters not allowed in a label name, such as the `:` in `runtime-class:kata`, become `-`). `in-pod-namespaces` node groups are untainted by default and may add a taint through the existing `taints` field; later capabilities define their own default (a VM-based runtime would normally require a dedicated, tainted node group). A node group lists only capabilities that are compatible with each other. This mirrors the AWS `gpu: true` pattern and keeps the extra kernel surface off nodes running Keycloak, ArgoCD and other foundational services.
 2. **`InfraSettings.Sandbox`.** A new field each cluster provider populates, so neither `pkg/argocd` nor the CLI needs to know the provider:
    ```go
    type SandboxSettings struct {
-       Capabilities []string          // e.g. ["in-pod-namespaces"]
-       NodeSelector map[string]string // where sandbox-capable nodes are
-       AppArmor     bool              // nodes enforce AppArmor; an AppArmor profile is required
+       // Capabilities maps each advertised capability (e.g. "in-pod-namespaces")
+       // to where pods that need it must run.
+       Capabilities map[string]SandboxPlacement
+       AppArmor     bool // in-pod-namespaces nodes enforce AppArmor; an AppArmor profile is required
+   }
+
+   type SandboxPlacement struct {
+       NodeSelector map[string]string
+       Tolerations  []corev1.Toleration
    }
    ```
 3. **Per-provider node prep (layer 1)**, only where needed. Hetzner: per-pool pre-k3s commands that lift Ubuntu's restriction (preferably a scoped AppArmor `userns` grant rather than the global sysctl), plus pool labels. AWS/Azure: labels; extra node prep only if verification shows it is needed (on AWS, the EKS module's existing pre-nodeadm cloud-init hook, today used only for the extra CA bundle, is the natural place). `local`/`existing`: no node changes; documented host requirements and the probe below.
-4. **Security profiles (layers 2-3) via the [Security Profiles Operator](https://sigs.k8s.io/security-profiles-operator)**, installed as conditional foundational software ([ADR-0006](0006-conditional-foundational-software-helm.md)) when any capability is enabled. NIC ships a `nebari-sandbox` seccomp profile (runtime default plus the namespace syscalls, with high-risk families such as `bpf`, `io_uring` and netfilter configuration still denied) and, where `AppArmor` is true, a `nebari-sandbox` AppArmor profile granting `userns` and the required `mount` rules. The operator depends on cert-manager, which NIC already deploys. The profiles are named for the capability, not for a tool, and the same mechanism carries any profiles later capabilities need. The operator's node agent is a DaemonSet that runs on every node by default; NIC restricts it to the sandbox node groups (`nebari.dev/sandbox=true`) through the scheduling settings on the operator's daemon configuration, so nodes outside those groups get neither the agent nor the profiles. Profiles are opt-in per pod: placing them on a node changes nothing for pods that do not reference them.
-5. **Pack contract (ties into [ADR-0003](0003-software-pack-codegen.md)).** A `sandbox.*` Helm-value convention: `sandbox.capabilities`, `sandbox.nodeSelector`, `sandbox.seccompProfile`, `sandbox.appArmorProfile`. `nebari-integration.yaml` may declare `requires: { sandbox: [in-pod-namespaces] }`, and NIC fails the deploy if the cluster cannot satisfy it. Until pack codegen lands, NIC also publishes the same data in a cluster-capabilities ConfigMap.
-6. **Verification.** A post-bootstrap probe in `pkg/nic` deploy runs a short-lived pod on a sandbox node that exercises each advertised capability, reporting the failing layer through the status channel. Bubblewrap is the reference tool for the probe and the tests because it exercises all of layers 1-3 in one command; this is a test-harness choice, not a contract. A user-journey test asserts both directions: a pod using the profile can create namespaces, and a pod with the default profile cannot. This follows the same pattern as the NetworkPolicy enforcement check proposed in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) (a positive and a negative case, run per provider), and the two should share their harness.
-7. **ADR-0010 alignment.** The hardened-mode admission policy (#480) gets a scoped exception for the Security Profiles Operator's privileged DaemonSet, and allows only the `nebari-sandbox` Localhost profiles, never `Unconfined`.
+4. **Security profiles (layers 2-3) via the [Security Profiles Operator](https://sigs.k8s.io/security-profiles-operator)**, installed as conditional foundational software ([ADR-0006](0006-conditional-foundational-software-helm.md)) when any capability is enabled. NIC ships a `nebari-sandbox` seccomp profile (runtime default plus the namespace syscalls, with high-risk families such as `bpf`, `io_uring` and netfilter configuration still denied) and, where `AppArmor` is true, a `nebari-sandbox` AppArmor profile granting `userns` and the required `mount` rules. The operator depends on cert-manager, which NIC already deploys. The profiles are named for the capability, not for a tool, and the same mechanism carries any profiles later capabilities need. The operator's node agent is a DaemonSet that runs on every node by default; NIC restricts it to the node groups that need its profiles (here, those labelled `sandbox.nebari.dev/in-pod-namespaces`) through the scheduling settings on the operator's daemon configuration, so other nodes, including node groups for other capabilities, get neither the agent nor the profiles. Profiles are opt-in per pod: placing them on a node changes nothing for pods that do not reference them.
+5. **Pack contract (ties into [ADR-0003](0003-software-pack-codegen.md)).** A `sandbox.*` Helm-value convention with placement per capability, mirroring `SandboxSettings`: `sandbox.capabilities.<name>.nodeSelector` and `sandbox.capabilities.<name>.tolerations`, plus capability-specific values such as `sandbox.capabilities.in-pod-namespaces.seccompProfile` and `.appArmorProfile`. `nebari-integration.yaml` may declare `requires: { sandbox: [in-pod-namespaces] }`, and NIC fails the deploy if the cluster cannot satisfy it. Until pack codegen lands, NIC also publishes the same data in a cluster-capabilities ConfigMap.
+6. **Verification.** A post-bootstrap probe in `pkg/nic` deploy runs short-lived pods, placed using each capability's own node selector and tolerations, that exercise every advertised capability, reporting the failing layer through the status channel. A capability is advertised only after its probe passes. Where packs combine capabilities, the probe also tests the combination, because one capability can behave differently under another: for example, NetworkPolicy enforcement is checked separately for pods running under each advertised `RuntimeClass`, since a VM-based runtime changes the pod's network path. Bubblewrap is the reference tool for the probe and the tests because it exercises all of layers 1-3 in one command; this is a test-harness choice, not a contract. A user-journey test asserts both directions: a pod using the profile can create namespaces, and a pod with the default profile cannot. This follows the same pattern as the NetworkPolicy enforcement check proposed in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) (a positive and a negative case, run per provider), and the two should share their harness.
+7. **ADR-0010 alignment.** Capability-providing node agents are privileged DaemonSets: the Security Profiles Operator for this capability, and runtime installers for later ones. The hardened-mode admission policy (#480) gets one general, scoped exception for such agents, pinned by namespace and limited to the node groups of the capability they provide, rather than a per-component exemption. It allows only the `nebari-sandbox` Localhost profiles, never `Unconfined`.
 
 ### Consequences
 
@@ -132,7 +153,7 @@ This ADR decides the contract and delivers the first capability, `in-pod-namespa
 
 **Bad:**
 - A new foundational component (Security Profiles Operator) with its own privileged DaemonSet and CRDs.
-- Enabling user namespaces on sandbox nodes widens the kernel attack surface there; kernels must be patched promptly.
+- Enabling user namespaces on `in-pod-namespaces` nodes widens the kernel attack surface there; kernels must be patched promptly.
 - With `in-pod-namespaces` alone, tools reuse the container's `/proc`, which exposes process information a fresh procfs would hide.
 - Namespace-based sandboxing does not protect against kernel exploits; it is not a substitute for a VM-grade boundary for hostile multi-tenant code. The capability documentation must say so.
 - More per-provider surface to verify and keep current as node images change.
@@ -218,10 +239,10 @@ Kept as a planned `runtime-class:<name>` capability rather than the starting poi
 - Does PSS `restricted` admit `procMount: Unmasked` for `hostUsers: false` pods, or only `baseline`? Sources conflict; relevant to the `pod-user-namespaces` follow-up.
 - Actual kernel, containerd and runc versions on the AL2023 EKS AMI, AKS node images, and hetzner-k3s v2.4.6's Ubuntu image.
 - Does the Security Profiles Operator's AppArmor support meet our needs, or is a small NIC-owned loader required for AppArmor only?
-- Confirm the Security Profiles Operator's daemon can be pinned to a node selector (affinity/tolerations on its daemon configuration) in the release we would pin, and how sandbox node groups that scale up get their profiles before pods are scheduled to them.
+- Confirm the Security Profiles Operator's daemon can be pinned to a node selector (affinity/tolerations on its daemon configuration) in the release we would pin, and how `in-pod-namespaces` node groups that scale up get their profiles before pods are scheduled to them.
 - How does AppArmor apply to pods on kind nodes?
 - Does hetzner-k3s v2.4.6 support per-pool pre-k3s commands, or only global ones?
-- Is a per-node-group flag the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
+- Is per-node-group opt-in the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
 - Do the k3s (hetzner-k3s) and AKS default kubelet configurations enable `seccompDefault`? This decides whether pods without an explicit profile are filtered today on those providers. (Resolved for EKS: not enabled; see Context.)
 - Confirm every *(unverified)* entry in the provider table by running the probe described above on each provider.
 - Is Landlock enabled in the node kernels of every provider (spectrum row 2)? If so, the ADR's pack documentation should point developers at it as the no-cluster-change option.
