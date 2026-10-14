@@ -103,6 +103,8 @@ Chosen option: "Option 3 - a tool-neutral, extensible capability contract, deliv
 
 ### The contract
 
+In short, the contract is an interface to the **node execution environment**: NIC promises, by name and with verification, what the nodes' kernel, kubelet configuration, container runtime and security profiles will let a pod do. Packs still write their own pod settings and run their own sandboxing tools; networking (NetworkPolicy enforcement) and higher-level sandbox systems that build on these capabilities are outside it.
+
 The cluster advertises a **set of capabilities**, not a single level, because the options are not strictly ordered (a VM runtime is not a superset of in-pod namespaces). Capabilities name **guarantees, not mechanisms**.
 
 | Capability | Guarantee | Qualified consumer | Phase |
