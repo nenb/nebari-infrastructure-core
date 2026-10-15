@@ -53,10 +53,11 @@ Pack developers cannot enable rows 2 and 3 themselves. Row 2 runs with no change
 2. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
 3. A tool-neutral, extensible capability contract, delivered in phases: process self-restriction first, then in-pod unprivileged namespaces.
 4. Go straight to a stronger-isolation runtime (gVisor or Kata `RuntimeClass`) as the only sandbox option.
+5. Adopt a full sandbox platform (for example Agent Substrate) instead of a capability contract.
 
 ## Decision Outcome
 
-Chosen option: "Option 3 - a tool-neutral, extensible capability contract, delivered in phases", because it gives pack developers a primitive now that needs no relaxation of pod security, adds namespace sandboxes once their delivery mechanism is proven, and defines a stable way to advertise stronger isolation later without tying NIC to a tool. Option 2's concreteness is kept by qualifying each capability against a tested consumer; Option 4 remains the planned path for runtime-backed capabilities.
+Chosen option: "Option 3 - a tool-neutral, extensible capability contract, delivered in phases", because it gives pack developers a primitive now that needs no relaxation of pod security, adds namespace sandboxes once their delivery mechanism is proven, and defines a stable way to advertise stronger isolation later without tying NIC to a tool. Option 2's concreteness is kept by qualifying each capability against a tested consumer; Option 4 remains the planned path for runtime-backed capabilities, and Option 5's platforms are candidate providers for those capabilities rather than a replacement for the contract.
 
 ### The contract
 
@@ -139,6 +140,19 @@ Provide only a `RuntimeClass` backed by gVisor or Kata, e.g. through `kubernetes
 - **Cons:** provider-specific runtime installation (nested virtualisation or bare metal for Kata), memory and I/O overhead, compatibility gaps; changes the pod model rather than letting packs confine tools inside an existing pod.
 
 Kept as the planned `user-space-kernel` and `vm-boundary` capabilities.
+
+### Option 5: Adopt a full sandbox platform (e.g. Agent Substrate)
+
+Install a complete agent-sandbox platform as NIC's sandboxing answer and have packs run untrusted work on it. Agent Substrate is the leading example: a control plane that runs many "actors" on a pool of worker pods, isolates each with gVisor or a microVM it drives itself, suspends and resumes them from snapshots in object storage, and brokers egress with credential injection.
+
+- **Pros:** a much stronger boundary than rows 2 and 3, appropriate for attacker-influenced or multi-tenant code; egress policy, credential injection, suspend/resume and density come built in rather than being assembled by each pack; an ecosystem is forming around it.
+- **Cons:**
+  - Solves a different problem: it replaces the pod model (work runs as actors in the platform's worker pods) rather than fencing tools inside an existing pod such as a JupyterLab server, so packs would have to be re-architected around it.
+  - Cannot run on NIC's providers today: Agent Substrate needs Kubernetes 1.36 or later with beta pod-certificate APIs that managed services do not let you enable (realistically 1.37), enforced NetworkPolicy ([#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) is blocked), changes to GKE-specific node paths, and KVM-capable nodes for microVMs (not Hetzner Cloud).
+  - A weaker pod-level posture: its worker pods need added capabilities with seccomp and AppArmor unconfined (the relaxed-workload tier), which ADR-0010's hardened mode would have to admit by exception, whereas `process-self-restriction` runs under Pod Security `restricted`.
+  - A large operational footprint for a pre-1.0 project with no compatibility guarantees: API server, controller, router, egress gateway, node agent, Postgres and object storage.
+
+Not chosen as the starting point. The contract is designed so that such a platform can later provide `user-space-kernel` or `vm-boundary` through its own API (a system-provided capability), with its cluster requirements and privilege tier set in that capability's ADR. If packs converge on such a platform, Phase 2 can be deprioritised at its release gates; Phase 1 remains useful either way.
 
 ## Open Questions
 
