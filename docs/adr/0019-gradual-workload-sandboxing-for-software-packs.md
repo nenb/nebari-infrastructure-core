@@ -142,18 +142,14 @@ Kept as the planned `user-space-kernel` and `vm-boundary` capabilities.
 
 ## Open Questions
 
-- Partly resolved (§20.4): EKS AMIs use kernel 6.12 for Kubernetes 1.33–1.35 and 6.18 for 1.36+, and AKS moves to Ubuntu 24.04 from 1.35. Still open: whether Landlock is in the active security-module list on AL2023 and Ubuntu nodes, and whether NIC's AKS module should expose `os_sku` so earlier Kubernetes versions can qualify.
+- Should NIC's AKS module expose an `os_sku` (node OS image) setting, so Azure clusters below Kubernetes 1.35 can use Ubuntu 24.04 and qualify for `process-self-restriction`? (EKS AMIs already use a qualifying kernel from Kubernetes 1.33; AKS moves to Ubuntu 24.04 from 1.35; see §20.4.)
 - Gate A: upstream AppArmor support in the Security Profiles Operator, another maintained loader, or AppArmor nodes deferred indefinitely?
 - Post-bootstrap lifecycle hook in `pkg/nic`, or an amendment to ADR-0006?
 - Where the readiness barrier's taint removal runs (a small NIC-owned controller, or the probe DaemonSet itself), and what RBAC it needs to patch nodes.
-- Partly resolved (§20.5): kind runs node containers AppArmor- and seccomp-unconfined. Still open: whether the containerd inside a kind node applies AppArmor profiles to pods on Linux hosts with AppArmor (needs a live test).
 - Is per-node-group opt-in the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
-- Should NetworkPolicy enforcement be advertised through this contract (the `network-policy` candidate), or stay a platform guarantee that packs assume? To agree with the owners of [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691).
-- Several sandbox systems depend on the Agent Sandbox controller and CRDs and leave installing them to the cluster administrator. Should NIC offer it as conditional foundational software?
 - Should the Pack Specification's security baseline add a sandboxing section that points at this contract, and say anything about `seccompProfile` for pods that do not sandbox?
 - Should `in-pod-namespaces` ever cover pods that run sandboxes for several users or sessions? With single-ID user namespaces every session maps to the pod's own host UID, so files are not separated between sessions; separating them needs a distinct real UID per session, which needs root and belongs inside a stronger boundary.
 - Should capability names themselves be versioned (as the profiles now are), so a guarantee can be tightened without silently changing its meaning?
-- Confirm every *(unverified)* entry in the provider tables by running the probes on each provider.
 
 ## Links
 
