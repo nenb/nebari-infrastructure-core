@@ -44,7 +44,7 @@ This is an ADR rather than documentation because it changes NIC's public interfa
 - **Tool-neutral, but not tool-unqualified.** NIC provides cluster primitives, not a sandboxing tool. Each guarantee is qualified against at least one concrete, tested consumer configuration.
 - **Provider-neutral.** Capability flows through `InfraSettings`, with no provider-name switches outside `pkg/providers/cluster/` (see [System Overview](../design-doc/architecture/02-system-overview.md)).
 - **Prefer Pod Security `restricted`.** Capabilities that need no relaxation come first.
-- **Fail closed.** A capability the operator requires either verifies or the deploy fails; nothing is advertised that has not been observed working.
+- **Fail closed.** A capability the operator requires is either detected on at least one node group or the deploy fails; consumers still check the guarantee themselves before relying on it.
 - **Compatible with the `security_level` ladder** in [ADR-0010](0010-high-security-mode.md).
 
 Drivers that apply only to later capabilities are recorded in [§20.15](../design-doc/implementation/20-workload-sandboxing.md#2015-guidance-for-later-capability-adrs).
@@ -72,16 +72,16 @@ The contract is an interface to the **node execution environment**: NIC promises
 ### Interfaces
 
 1. **Desired configuration.** `process-self-restriction` needs no opt-in. A top-level `sandbox.require` lists capabilities the operator requires, optionally with a minimum such as `minLandlockABI`. `InfraSettings.Sandbox` reports which node groups are intended to provide which capabilities.
-2. **Observed readiness.** NIC records what it verified, per capability and node group, in a read-only record with an expiry. The record is informational: consumers fail closed by checking the guarantee themselves. Attributes such as the Landlock ABI are guarantees over the exact advertised placement.
+2. **Readiness record.** NIC records, per capability and node group, what it detected and how (for this capability, inferred from node metadata), in a read-only record. The record is informational: consumers fail closed by checking the guarantee themselves. Attributes such as the Landlock ABI are expectations over the exact advertised placement.
 3. **Consumer integration.** Packs are integrated explicitly through documented Helm values, or by defaulting to the conventional labels, which are the stable interface. Helm key names will be aligned with the pack-wiring direction of [ADR-0003](0003-software-pack-codegen.md) and #670 when that settles; enforcing pack requirements is future work.
 
 Details, including the Go types and withdrawal semantics, are in [§20.6](../design-doc/implementation/20-workload-sandboxing.md#three-separate-interfaces).
 
-### Lifecycle and verification
+### Lifecycle and detection
 
-NIC installs nothing that keeps running. Each time `nic deploy` runs, and whenever an operator runs a new `nic verify` command, NIC starts short-lived probe pods on each node group, deletes them afterwards, and writes the readiness record. A required capability that fails verification makes the command exit non-zero. Operators who want a regular cadence run `nic verify` on a schedule from outside the cluster, and the record's expiry is set to match. This needs no change to [ADR-0006](0006-conditional-foundational-software-helm.md).
+NIC installs nothing in the cluster. Each time `nic deploy` runs, and whenever an operator runs a new `nic verify` command (useful after node upgrades or autoscaling changes), NIC reads each node's kernel version and OS image from the Kubernetes API (`node.status.nodeInfo`) and maps them to the Landlock ABI that kernel line provides, using a table NIC maintains for the node images it deploys. It labels qualifying nodes and writes the readiness record. Node images NIC does not recognise are not advertised. A required capability that is not detected on any node group makes the command exit non-zero. This needs no change to [ADR-0006](0006-conditional-foundational-software-helm.md).
 
-Probes run under the capability's exact pod settings, in both directions where a negative case exists, with positive controls on the same node ([§20.8](../design-doc/implementation/20-workload-sandboxing.md#208-delivery-phase-1-process-self-restriction), [§20.10](../design-doc/implementation/20-workload-sandboxing.md#2010-verification)). Discovery is passive: NIC advertises the capability on node groups whose images qualify (targeting Landlock ABI 4) and never changes node images on its own.
+Detection by node metadata is an **inference, not an observation**: it cannot see whether Landlock is enabled at boot, whether a distribution backported newer Landlock features, or whether the checks behave as expected under the runtime's default seccomp profile. That is why consumers must still check the guarantee themselves, and why upgrading inference to observation with a probe is an open question below ([§20.8](../design-doc/implementation/20-workload-sandboxing.md#208-delivery-phase-1-process-self-restriction)). Discovery is passive: NIC advertises the capability on node groups whose images qualify (targeting Landlock ABI 4) and never changes node images on its own.
 
 ### Security
 
@@ -92,12 +92,13 @@ Probes run under the capability's exact pod settings, in both directions where a
 **Good:**
 - A useful primitive with no relaxation of pod security, no long-running components and no admission exceptions.
 - Pack developers get a documented, provider-neutral primitive and choose their own tool.
-- What NIC advertises is what it has observed.
+- Detection needs no image, no pods and no in-cluster components.
 - Stronger isolation can be added later under reserved names without breaking packs that rely on this capability.
 
 **Bad:**
 - The capability ties the platform to node kernel versions: AKS below Kubernetes 1.35 does not qualify by default, and node groups on older kernels cannot provide it.
-- NIC gains a verification step, a `nic verify` command, a probe image and a readiness record to maintain.
+- What NIC advertises is an expectation inferred from node metadata, not an observation; a node can be advertised and still lack the capability (for example if Landlock is disabled at boot).
+- NIC gains a detection step, a `nic verify` command, a readiness record, and a kernel-to-Landlock-ABI table to keep current as providers change node images.
 - The contract's shape is fixed before a second capability exists, so later capabilities must fit it or amend it.
 - Pack integration is manual until ADR-0003 exists.
 
@@ -133,6 +134,7 @@ The full assessment of Options 4 and 5 is in [§20.16](../design-doc/implementat
 - Should NIC's AKS module expose an `os_sku` (node OS image) setting, so Azure clusters below Kubernetes 1.35 can use Ubuntu 24.04 and qualify? (§20.4.)
 - Should the Pack Specification's security baseline add a sandboxing section that points at this contract, and say anything about `seccompProfile` for pods that do not sandbox?
 - Should Nebari offer a uniform API for packs to **request** sandboxes, independent of the provider underneath? The request mechanism differs by provider (`runtimeClassName` for a `RuntimeClass`, a platform's own API or SDK); a standard request layer, such as the Agent Sandbox project's `Sandbox`/`SandboxClaim` resources, would be a separate decision.
+- Is it worth implementing a **probe image**: a small purpose-built program, packaged as a container image, that NIC runs as short-lived pods on each node group to observe the capability directly (Landlock enabled at boot and its real ABI, filesystem and TCP rules taking effect, nested seccomp user notification working under the default seccomp profile)? It would turn inferred capabilities into observed ones and catch nodes the metadata misjudges, at the cost of building, publishing, pinning and maintaining a multi-architecture image and the code that runs it. Running such a probe once by hand on each provider would show how often inference is wrong, which should decide it.
 - Should capability names themselves be versioned, so a guarantee can be tightened without silently changing its meaning?
 
 Questions specific to later capabilities are in [§20.14](../design-doc/implementation/20-workload-sandboxing.md#2014-future-work-deferred-from-adr-0021).
