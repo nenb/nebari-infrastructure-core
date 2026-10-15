@@ -163,6 +163,7 @@ Not chosen as the starting point. The contract is designed so that such a platfo
 - Is per-node-group opt-in the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
 - Should the Pack Specification's security baseline add a sandboxing section that points at this contract, and say anything about `seccompProfile` for pods that do not sandbox?
 - Should `in-pod-namespaces` ever cover pods that run sandboxes for several users or sessions? With single-ID user namespaces every session maps to the pod's own host UID, so files are not separated between sessions; separating them needs a distinct real UID per session, which needs root and belongs inside a stronger boundary.
+- Should Nebari offer a uniform API for packs to **request** sandboxes, independent of the provider underneath? This ADR only advertises capabilities and names the system that provides each; the request mechanism still differs by provider (`runtimeClassName` for a `RuntimeClass`, a platform's own API or SDK). A standard request layer, such as the Agent Sandbox project's `Sandbox`/`SandboxClaim` resources, could sit on top of these capabilities and would be a separate decision.
 - Should capability names themselves be versioned (as the profiles now are), so a guarantee can be tightened without silently changing its meaning?
 
 ## Links
