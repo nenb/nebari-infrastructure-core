@@ -22,7 +22,7 @@ There is no single right way to do this. The options form a spectrum that differ
 | 1b | The user's own browser | The browser, on the user's machine | Nothing | Packs can do this today |
 | 2 | Process self-restriction (Landlock + seccomp) | The process restricts itself | A node kernel with Landlock ABI 3+ (ABI 4 for TCP rules) | **`process-self-restriction`, Phase 1** |
 | 3 | Namespace sandbox in the pod (bubblewrap and similar) | Namespaces on the shared host kernel | Node prep and security profiles | **`in-pod-namespaces`, Phase 2** |
-| 3b | Headless browser in the pod | Chromium's own namespace sandbox | As row 3 | Covered by `in-pod-namespaces` |
+| 3b | Headless browser in the pod | Chromium's own namespace sandbox | As row 3 | Potential consumer of `in-pod-namespaces`; not qualified (Chromium's sandbox may need more than the guarantee, such as its own pid namespace) |
 | 3c | System-container runtime (Sysbox) | User namespaces plus virtualised `/proc` and `/sys` | A `RuntimeClass` or a privileged outer container | Not delivered here |
 | 4 | Separate locked-down pod per task | Standard container isolation | Enforced NetworkPolicy for its network controls (#691/#675) | Packs can do this today; `pod-user-namespaces` later |
 | 5 | User-space kernel (gVisor) | gVisor's kernel; no direct host syscalls | Runtime install and a `RuntimeClass` | `user-space-kernel`, later ADR |
