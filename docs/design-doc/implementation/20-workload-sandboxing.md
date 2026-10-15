@@ -160,7 +160,7 @@ Today, conditional software ([ADR-0006](0006-conditional-foundational-software-h
 
 ## 20.9 Future work: delivery of `in-pod-namespaces` (Phase 2)
 
-This section is design for a future ADR, not a decision; ADR-0021 delivers only `process-self-restriction`.
+This section is the detailed design behind [ADR-0022](../../adr/0022-in-pod-namespaces-capability.md), which proposes delivering `in-pod-namespaces`, first on node groups without AppArmor; ADR-0021 delivers only `process-self-restriction`. ADR-0022 narrows the gates below: Gates C and D apply to its first delivery, while Gates A and B are what extend it to AppArmor nodes and to autoscaled Hetzner pools.
 
 Phase 2 ships only when all of its **release gates** are met:
 
