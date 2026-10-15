@@ -2,7 +2,7 @@
 
 ## 20.1 Scope
 
-This document holds the implementation design behind [ADR-0019: Gradual Workload Sandboxing Capability for Software Packs](../../adr/0019-gradual-workload-sandboxing-for-software-packs.md). The ADR records the decision: a tool-neutral capability contract, delivered in phases, with separate interfaces for desired configuration, observed readiness and consumer integration. This document records the detail that implements and justifies it: the sandboxing spectrum, provider findings, the full capability definitions, delivery steps and release gates, verification, security considerations, composition and privilege tiers, and related work. Where the two disagree, the ADR is authoritative for the decision and this document is updated to match.
+This document holds the implementation design behind [ADR-0021: Gradual Workload Sandboxing Capability for Software Packs](../../adr/0021-gradual-workload-sandboxing-for-software-packs.md). The ADR records the decision: a tool-neutral capability contract with separate interfaces for desired configuration, observed readiness and consumer integration, delivering `process-self-restriction` ("Phase 1" below) and reserving names for later capabilities. The `in-pod-namespaces` design ("Phase 2" below) and the material on later capabilities are future work here; each needs its own ADR before delivery. This document records the detail that implements and justifies it: the sandboxing spectrum, provider findings, the full capability definitions, delivery steps and release gates, verification, security considerations, composition and privilege tiers, and related work. Where the two disagree, the ADR is authoritative for the decision and this document is updated to match.
 
 ## 20.2 The sandboxing spectrum
 
@@ -251,6 +251,25 @@ Scale limits are part of a capability's definition: where a provider's system ru
 **Pack contract.**
 
 - The [Nebari Pack Specification](https://github.com/nebari-dev/nebari-operator/blob/main/docs/pack-specification.md) (section 6, Security baseline) requires a hardened `securityContext` at GA and says packs SHOULD ship a NetworkPolicy. It says nothing about seccomp today. If it later requires `RuntimeDefault`, packs that currently run sandboxing tools with no syscall filter (see "Why it can appear to work today") stop working, so the `sandbox.*` contract here should be referenced from that section.
+
+## 20.15 Future work deferred from ADR-0021
+
+When ADR-0021 was narrowed to `process-self-restriction`, the following consequences and open questions, which apply to `in-pod-namespaces` (§20.9) and later capabilities, moved here. They are inputs to those capabilities' own ADRs.
+
+**Consequences of delivering `in-pod-namespaces`:**
+
+- It depends on external work (an AppArmor mechanism, a hetzner-k3s fix) and may be limited to non-AppArmor node groups for some time.
+- NIC owns a complete seccomp policy per architecture and must track runtime default changes.
+- It needs a new post-bootstrap lifecycle phase in `pkg/nic`, or an ADR-0006 amendment.
+- Enabling user namespaces on dedicated node groups widens the kernel attack surface there.
+
+**Open questions:**
+
+- Gate A: upstream AppArmor support in the Security Profiles Operator, another maintained loader, or AppArmor nodes deferred indefinitely?
+- Post-bootstrap lifecycle hook in `pkg/nic`, or an amendment to ADR-0006?
+- Where the readiness barrier's taint removal runs (a small NIC-owned controller, or the probe DaemonSet itself), and what RBAC it needs to patch nodes.
+- Is per-node-group opt-in the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
+- Should `in-pod-namespaces` ever cover pods that run sandboxes for several users or sessions? With single-ID user namespaces every session maps to the pod's own host UID, so files are not separated between sessions; separating them needs a distinct real UID per session, which needs root and belongs inside a stronger boundary.
 
 ## 20.14 Links
 
