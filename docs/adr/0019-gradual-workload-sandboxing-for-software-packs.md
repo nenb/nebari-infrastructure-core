@@ -40,7 +40,7 @@ Pack developers cannot enable rows 2 and 3 themselves. Row 2 runs with no change
 
 - **Build in steps.** Deliver something usable now, behind a contract that stronger options can be added to later without breaking packs that already rely on it.
 - **Tool-neutral, but not tool-unqualified.** NIC provides cluster primitives, not a sandboxing tool. The interface names guarantees; each guarantee is qualified against at least one concrete, tested consumer configuration, and other tools are potential consumers until tested.
-- **Provider-neutral.** Pack developers should not need to know which provider they are on. Capability flows through `InfraSettings`, with no provider-name switches outside `pkg/providers/cluster/` (see AGENTS.md).
+- **Provider-neutral.** Pack developers should not need to know which provider they are on. Capability flows through `InfraSettings`, with no provider-name switches outside `pkg/providers/cluster/` (see [System Overview](../design-doc/architecture/02-system-overview.md)).
 - **Prefer Pod Security `restricted`.** Capabilities that need no relaxation come first; relaxation is the exception a capability must justify.
 - **Fail closed.** A capability the operator asked for either verifies or the deploy fails; nothing is advertised that has not been observed working.
 - **Off by default and narrowly scoped.** Unprivileged user namespaces widen the kernel attack surface (e.g. CVE-2024-1086 was reachable via `CAP_NET_ADMIN` in a user namespace), so enable them only on dedicated node groups.
