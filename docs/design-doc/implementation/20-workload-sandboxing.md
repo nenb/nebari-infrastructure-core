@@ -155,9 +155,11 @@ Today, conditional software ([ADR-0006](0006-conditional-foundational-software-h
 1. **No opt-in, no relaxation, no components.** No profiles, no operator, no admission exception and no node preparation are needed. Steps 3-4 of the lifecycle are empty.
 2. **Qualifying node images: passive by default.** NIC discovers and advertises the capability on node groups whose current images qualify; it does **not** change node images on its own, and explicit image pins are preserved. Moving a node group to a qualifying image is an explicit, operator-requested migration through the provider's own config, as for GPU images. NIC targets Landlock ABI 4 (for example Ubuntu 24.04's 6.8 kernel, or AL2023 on a 6.12 kernel); node groups that reach only ABI 3 still qualify, with their ABI reported. On Azure, Kubernetes 1.35 and later bring Ubuntu 24.04 by default; earlier versions need NIC's AKS module to expose `os_sku`. `local` and `existing` are detect-only. A node group that cannot qualify (for example a GPU image pinned to an older kernel) is not listed as providing the capability.
 3. **Placement.** Qualifying node groups are labelled `sandbox.nebari.dev/process-self-restriction` and `sandbox.nebari.dev/landlock-abi`. No taint is needed: nothing on these nodes is relaxed.
-4. **Verification.** On each node group, a non-root pod with every capability dropped and the default seccomp profile applies a Landlock ruleset and confirms a denied write fails, reports the highest ABI available and, at ABI 4, confirms a disallowed `connect` fails, and installs a nested seccomp user-notification filter whose supervisor injects a descriptor into the child with `SECCOMP_IOCTL_NOTIF_ADDFD` (with `SECCOMP_ADDFD_FLAG_SEND`), and the child then uses that descriptor. Each denial check has a positive control on the same node (the same write or `connect` succeeds without the ruleset), so an unrelated filesystem or network failure cannot pass as successful confinement.
+4. **Verification.** On each node group, a non-root pod with every capability dropped and the default seccomp profile applies a Landlock ruleset and confirms a denied write fails, reports the highest ABI available and, at ABI 4, confirms a disallowed `connect` fails, and installs a nested seccomp user-notification filter whose supervisor injects a descriptor into the child with `SECCOMP_IOCTL_NOTIF_ADDFD` (with `SECCOMP_ADDFD_FLAG_SEND`), and the child then uses that descriptor. Each denial check has a positive control on the same node (the same write or `connect` succeeds without the ruleset), so an unrelated filesystem or network failure cannot pass as successful confinement. For this capability, verification runs each time `nic deploy` or `nic verify` runs, using short-lived probe pods that are deleted afterwards; nothing stays running in the cluster. Operators who want a regular cadence run `nic verify` on a schedule from outside the cluster, and the readiness record's expiry is set to match. In-cluster scheduled re-verification and the readiness barrier apply to capabilities with installed components (§20.9).
 
-## 20.9 Delivery, Phase 2: `in-pod-namespaces`
+## 20.9 Future work: delivery of `in-pod-namespaces` (Phase 2)
+
+This section is design for a future ADR, not a decision; ADR-0021 delivers only `process-self-restriction`.
 
 Phase 2 ships only when all of its **release gates** are met:
 
@@ -201,6 +203,8 @@ When the gates are met:
 - The NetworkPolicy enforcement check proposed in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) uses the same positive/negative pattern, and the two should share their harness.
 
 ## 20.11 Security considerations
+
+Items 1-4 below concern the future `in-pod-namespaces` capability (§20.9); `process-self-restriction` relaxes nothing.
 
 `process-self-restriction` relaxes nothing and runs under Pod Security `restricted`. Today, by contrast, pods without a seccomp profile run with no syscall filter at all (confirmed on AWS), and packs that want isolation reach for root, privileged pods or `Unconfined` profiles; a sanctioned, narrower path improves on that. `in-pod-namespaces` adds real risk, bounded only if:
 
@@ -252,7 +256,7 @@ Scale limits are part of a capability's definition: where a provider's system ru
 
 - The [Nebari Pack Specification](https://github.com/nebari-dev/nebari-operator/blob/main/docs/pack-specification.md) (section 6, Security baseline) requires a hardened `securityContext` at GA and says packs SHOULD ship a NetworkPolicy. It says nothing about seccomp today. If it later requires `RuntimeDefault`, packs that currently run sandboxing tools with no syscall filter (see "Why it can appear to work today") stop working, so the `sandbox.*` contract here should be referenced from that section.
 
-## 20.15 Future work deferred from ADR-0021
+## 20.14 Future work deferred from ADR-0021
 
 When ADR-0021 was narrowed to `process-self-restriction`, the following consequences and open questions, which apply to `in-pod-namespaces` (§20.9) and later capabilities, moved here. They are inputs to those capabilities' own ADRs.
 
@@ -271,7 +275,40 @@ When ADR-0021 was narrowed to `process-self-restriction`, the following conseque
 - Is per-node-group opt-in the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
 - Should `in-pod-namespaces` ever cover pods that run sandboxes for several users or sessions? With single-ID user namespaces every session maps to the pod's own host UID, so files are not separated between sessions; separating them needs a distinct real UID per session, which needs root and belongs inside a stronger boundary.
 
-## 20.14 Links
+## 20.15 Guidance for later capability ADRs
+
+These decision drivers were part of ADR-0021 when it also covered `in-pod-namespaces`. They no longer bear on the capability ADR-0021 delivers, but apply to the ADRs that will deliver later capabilities:
+
+- **Off by default and narrowly scoped.** Relaxations that later capabilities need, such as unprivileged user namespaces, widen the kernel attack surface (e.g. CVE-2024-1086 was reachable via `CAP_NET_ADMIN` in a user namespace), so they are confined to dedicated node groups.
+- **Prefer community-maintained mechanisms** over NIC-owned node agents, where they can express the required policy.
+
+## 20.16 Alternatives considered in detail
+
+ADR-0021 summarises Options 4 and 5; their full assessment is recorded here.
+
+### Option 4: Stronger-isolation runtime only (gVisor or Kata)
+
+Provide only a `RuntimeClass` backed by gVisor or Kata, e.g. through `kubernetes-sigs/agent-sandbox`.
+
+- **Pros:** much stronger boundary; a kernel exploit in the workload does not directly yield the node.
+- **Cons:** provider-specific runtime installation (nested virtualisation or bare metal for Kata), memory and I/O overhead, compatibility gaps; changes the pod model rather than letting packs confine tools inside an existing pod.
+
+Kept as the planned `user-space-kernel` and `vm-boundary` capabilities.
+
+### Option 5: Adopt a full sandbox platform (e.g. Agent Substrate)
+
+Install a complete agent-sandbox platform as NIC's sandboxing answer and have packs run untrusted work on it. Agent Substrate is the leading example: a control plane that runs many "actors" on a pool of worker pods, isolates each with gVisor or a microVM it drives itself, suspends and resumes them from snapshots in object storage, and brokers egress with credential injection.
+
+- **Pros:** a much stronger boundary than rows 2 and 3, appropriate for attacker-influenced or multi-tenant code; egress policy, credential injection, suspend/resume and density come built in rather than being assembled by each pack; an ecosystem is forming around it.
+- **Cons:**
+  - Solves a different problem: it replaces the pod model (work runs as actors in the platform's worker pods) rather than fencing tools inside an existing pod such as a JupyterLab server, so packs would have to be re-architected around it.
+  - Cannot run on NIC's providers today: Agent Substrate needs Kubernetes 1.36 or later with beta pod-certificate APIs that managed services do not let you enable (realistically 1.37), enforced NetworkPolicy ([#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) is blocked), changes to GKE-specific node paths, and KVM-capable nodes for microVMs (not Hetzner Cloud).
+  - A weaker pod-level posture: its worker pods need added capabilities with seccomp and AppArmor unconfined (the relaxed-workload tier), which ADR-0010's hardened mode would have to admit by exception, whereas `process-self-restriction` runs under Pod Security `restricted`.
+  - A large operational footprint for a pre-1.0 project with no compatibility guarantees: API server, controller, router, egress gateway, node agent, Postgres and object storage.
+
+Not chosen as the starting point. The contract is designed so that such a platform can later provide `user-space-kernel` or `vm-boundary` through its own API (a system-provided capability), with its cluster requirements and privilege tier set in that capability's ADR. If packs converge on such a platform, the future `in-pod-namespaces` work can be deprioritised; `process-self-restriction` remains useful either way.
+
+## 20.17 Links
 
 - [ADR-0003: Software Pack Codegen](0003-software-pack-codegen.md)
 - [ADR-0006: Conditional Foundational Software](0006-conditional-foundational-software-helm.md)
