@@ -34,7 +34,7 @@ The full table, with examples and limits, and notes on egress, credentials, obse
 
 ### Why rows 2 and 3 need NIC
 
-Pack developers cannot enable rows 2 and 3 themselves. Row 2 runs with no changes to the pod's security settings, but needs node kernels with Landlock enabled at a sufficient ABI; Azure's default Ubuntu 22.04 image does not qualify. Row 3 is blocked in NIC-deployed pods by four layers: the node kernel (on Ubuntu 24.04, Hetzner's default, an AppArmor sysctl restricts unprivileged user namespaces), the runtime's default seccomp profile, the default AppArmor profile, and the masked `/proc`. Today it can appear to work on AWS only because pods without a seccomp profile run with no syscall filter at all, which is not a foundation packs can rely on. Per-provider findings are in the design doc ([§20.4](../design-doc/implementation/20-workload-sandboxing.md#204-why-row-2-process-self-restriction-needs-nic), [§20.5](../design-doc/implementation/20-workload-sandboxing.md#205-why-row-3-in-pod-namespaces-needs-nic)).
+Pack developers cannot enable rows 2 and 3 themselves. Row 2 runs with no changes to the pod's security settings, but needs node kernels with Landlock enabled at a sufficient ABI; On EKS, AMIs for Kubernetes 1.33 and later use a qualifying kernel (6.12); on AKS, the default image below Kubernetes 1.35 (Ubuntu 22.04) does not qualify. Row 3 is blocked in NIC-deployed pods by four layers: the node kernel (on Ubuntu 24.04, Hetzner's default, an AppArmor sysctl restricts unprivileged user namespaces), the runtime's default seccomp profile, the default AppArmor profile, and the masked `/proc`. Today it can appear to work only because pods without a seccomp profile run with no syscall filter at all (the default on EKS, hetzner-k3s and AKS as NIC deploys them), which is not a foundation packs can rely on. Per-provider findings are in the design doc ([§20.4](../design-doc/implementation/20-workload-sandboxing.md#204-why-row-2-process-self-restriction-needs-nic), [§20.5](../design-doc/implementation/20-workload-sandboxing.md#205-why-row-3-in-pod-namespaces-needs-nic)).
 
 ## Decision Drivers
 
@@ -142,13 +142,12 @@ Kept as the planned `user-space-kernel` and `vm-boundary` capabilities.
 
 ## Open Questions
 
-- Which node images qualify for `process-self-restriction`: the kernel on each AL2023 EKS AMI release NIC would pin, the node OS images the AKS module can select, and whether Landlock is in the active security-module list on each?
+- Partly resolved (§20.4): EKS AMIs use kernel 6.12 for Kubernetes 1.33–1.35 and 6.18 for 1.36+, and AKS moves to Ubuntu 24.04 from 1.35. Still open: whether Landlock is in the active security-module list on AL2023 and Ubuntu nodes, and whether NIC's AKS module should expose `os_sku` so earlier Kubernetes versions can qualify.
 - Gate A: upstream AppArmor support in the Security Profiles Operator, another maintained loader, or AppArmor nodes deferred indefinitely?
 - Post-bootstrap lifecycle hook in `pkg/nic`, or an amendment to ADR-0006?
 - Where the readiness barrier's taint removal runs (a small NIC-owned controller, or the probe DaemonSet itself), and what RBAC it needs to patch nodes.
-- How does AppArmor apply to pods on kind nodes?
+- Partly resolved (§20.5): kind runs node containers AppArmor- and seccomp-unconfined. Still open: whether the containerd inside a kind node applies AppArmor profiles to pods on Linux hosts with AppArmor (needs a live test).
 - Is per-node-group opt-in the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
-- Do the k3s (hetzner-k3s) and AKS default kubelet configurations enable `seccompDefault`? (Not enabled on EKS; see Context.)
 - Should NetworkPolicy enforcement be advertised through this contract (the `network-policy` candidate), or stay a platform guarantee that packs assume? To agree with the owners of [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691).
 - Several sandbox systems depend on the Agent Sandbox controller and CRDs and leave installing them to the cluster administrator. Should NIC offer it as conditional foundational software?
 - Should the Pack Specification's security baseline add a sandboxing section that points at this contract, and say anything about `seccompProfile` for pods that do not sandbox?
