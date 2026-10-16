@@ -160,7 +160,7 @@ Today, conditional software ([ADR-0006](0006-conditional-foundational-software-h
 
 ## 20.9 Future work: delivery of `in-pod-namespaces` (Phase 2)
 
-This section is the detailed design behind [ADR-0022](../../adr/0022-in-pod-namespaces-capability.md), which proposes delivering `in-pod-namespaces`, first on node groups without AppArmor; ADR-0021 delivers only `process-self-restriction`. ADR-0022 narrows the gates below: Gates C and D apply to its first delivery, while Gates A and B are what extend it to AppArmor nodes and to autoscaled Hetzner pools.
+This section is the detailed design behind [ADR-0022](../../adr/0022-in-pod-namespaces-capability.md), which proposes delivering `in-pod-namespaces`, first on node groups without AppArmor; ADR-0021 delivers only `process-self-restriction`. ADR-0022 changes this design for its first delivery (AWS): the seccomp profile is written at node boot and the kubelet's `seccompDefault` is set in node bootstrap, so the Security Profiles Operator, the post-bootstrap phase and the readiness barrier below are not used there; Gate C and Gate D still apply. The operator-based design and readiness barrier below are kept for providers without a node bootstrap hook in NIC (AKS), and Gates A and B describe what extends the capability to AppArmor nodes and autoscaled Hetzner pools, where ADR-0022 proposes loading a NIC-owned AppArmor profile at boot instead of through the operator.
 
 Phase 2 ships only when all of its **release gates** are met:
 
