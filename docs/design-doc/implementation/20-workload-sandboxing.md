@@ -211,6 +211,25 @@ ADR-0022 summarises these; the full text is recorded here.
 - **Option 4 (`runtimeClassName: gvisor` on the existing pod):** the pod stays as it is, and gVisor intercepts its syscalls in a user-space kernel, so a host-kernel exploit from the pod is far harder. It needs no unprivileged user namespaces, no NIC-owned seccomp allowlist and no AppArmor work, and its default mode needs no hardware virtualisation, so it could reach Hetzner Cloud and AKS sooner. Its costs: installing gVisor and a `RuntimeClass` per provider, compatibility gaps and I/O overhead for some workloads, limited GPU support, and checking that the pack's stack (for example JupyterLab and its kernels) runs under it. Above all, it protects the **host from the pod**, not the **pod's credentials from the agent's commands**, because everything in the pod shares gVisor's kernel. It is the right next capability where kernel-exploit risk matters, and it composes with this one: ADR-0021's composition rules allow namespace tools inside a `user-space-kernel` pod, subject to probing.
 - **Option 6 (separate, credential-free gVisor pod per session):** this does meet the threat model: the commands run where the agent's credentials are not, behind a user-space kernel, with no user namespaces on the host. Its costs are a pod start per session, sharing the workspace between the agent's pod and the sandbox pod (which needs shared storage or copying), giving the pack permission to create pods, and re-architecting packs around it; it also needs the same gVisor installation as Option 4. It is a strong candidate once `user-space-kernel` exists, and the [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) project could provide its request layer. It is not chosen first because it depends on that capability and on a larger change to how packs work.
 
+### ADR-0022: implementation work and verification in full
+
+ADR-0022 summarises these; the full text is recorded here.
+
+**Concrete work.**
+
+- **NIC's EKS module (`terraform-aws-eks-cluster`):** per-node-group bootstrap configuration (a nodeadm `NodeConfig` setting kubelet `seccompDefault`, plus cloud-init writing the profile files), and node-group labels and taints. Today the module uses its pre-nodeadm hook only for the extra CA bundle.
+- **NIC's AWS provider:** plumbing for the `sandbox` block, the image table and profile versions, and an IMDSv2 hop limit of 1 on sandbox node groups' launch template, so pods on them cannot reach the instance metadata service and the node's IAM credentials (later also enforceable with NetworkPolicy once [#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) lands).
+- **Cluster autoscaler:** confirm scale-from-zero works for tainted, labelled sandbox node groups.
+- **System DaemonSets:** `seccompDefault: true` and the metadata-service hop limit also apply to the VPC CNI, kube-proxy, CSI drivers and monitoring agents on these nodes; each must be tested under `RuntimeDefault` and with hop limit 1 (some components, such as the EBS CSI node plugin depending on its configuration, look up instance metadata), with any needed exceptions documented.
+- **Pack workloads:** the pack's main workload must be tested under `nebari-sandbox-v1` itself, since the profile covers the whole container.
+- **Admission policy, profile files and the image table** in NIC's repository, reviewed as security policy.
+
+**Verification.**
+
+- **Per node image, by hand:** before an image enters the table, a probe confirms the capability test and both qualified consumer configurations work with the profile, a pod without the profile on the same node cannot create a user namespace, netfilter and raw-socket creation fail inside a new user namespace, and Unix sockets on the container's filesystem are not reachable from the qualified configurations.
+- **At deploy:** the consistency check described above.
+- **Consumer acceptance, before the first delivery:** a consumer must show, with the capability in use, that credential canaries in the agent's environment, files and mounted secrets are unreadable by sandboxed commands, inherited descriptors are closed or allowed, networking is denied or limited to the pack's proxy, the instance metadata service is unreachable, its pod settings are correct, and it refuses unsandboxed fallback. Until an upstream pack adopts the capability, a small reference consumer in NIC's user-journey tests fulfils this.
+
 ## 20.10 Verification
 
 - **Per node group, then per node.** For `process-self-restriction`, detection is by node metadata unless the optional probe (§20.8) is adopted. Where probes are used, they run on each node group that should provide a capability, placed with that capability's own selectors and tolerations. For Phase 2, the per-node probe also gates the readiness barrier.
