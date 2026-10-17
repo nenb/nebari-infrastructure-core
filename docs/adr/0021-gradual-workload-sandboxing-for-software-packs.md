@@ -56,6 +56,7 @@ Drivers that apply only to later capabilities are recorded in [§20.15](../desig
 3. A tool-neutral, extensible capability contract, starting with process self-restriction, with stronger capabilities added by later ADRs.
 4. Go straight to a stronger-isolation runtime (gVisor or Kata `RuntimeClass`) as the only sandbox option.
 5. Adopt a full sandbox platform (for example Agent Substrate) instead of a capability contract.
+6. Detect the capability per node with [Node Feature Discovery](https://nfd.sigs.k8s.io/) instead of a NIC-maintained image table.
 
 ## Decision Outcome
 
@@ -128,6 +129,10 @@ A much stronger boundary, but it needs provider-specific runtime installation (n
 ### Option 5: Adopt a full sandbox platform (e.g. Agent Substrate)
 
 A stronger boundary with egress, credential injection and suspend/resume built in, but it replaces the pod model, cannot run on NIC's providers today, needs relaxed privileges for its worker pods, and has a large footprint for a pre-1.0 project. Such a platform is a candidate provider for later capabilities, not a replacement for the contract.
+
+### Option 6: Node Feature Discovery instead of an image table
+
+Node Feature Discovery, a Kubernetes SIG project, runs a DaemonSet that reads each node's kernel version and configuration, and a controller that turns those facts into node labels through `NodeFeatureRule` resources. It would label nodes automatically, including images NIC does not know, `existing` clusters and kind, with no table to keep current. It was discarded because it adds a DaemonSet, a controller with permission to patch nodes, and CRDs to the cluster for something NIC can do offline with little effort: the node images NIC provisions are known in advance and change rarely. Like the table, it reads kernel configuration rather than confirming Landlock is active at boot. It remains an option if clusters NIC does not provision become important.
 
 The full assessment of Options 4 and 5 is in [§20.16](../design-doc/implementation/20-workload-sandboxing.md#2016-alternatives-considered-in-detail).
 
