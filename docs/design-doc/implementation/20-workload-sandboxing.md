@@ -289,7 +289,7 @@ These decision drivers were part of ADR-0021 when it also covered `in-pod-namesp
 
 ## 20.16 Alternatives considered in detail
 
-ADR-0021 summarises Options 4 and 5; their full assessment is recorded here.
+ADR-0021 summarises Options 4, 5 and 7; their full assessment is recorded here.
 
 ### Option 4: Stronger-isolation runtime only (gVisor or Kata)
 
