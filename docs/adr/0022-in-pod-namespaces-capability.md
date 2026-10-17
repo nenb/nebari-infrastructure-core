@@ -72,7 +72,7 @@ The first delivery is **AWS** (AL2023 node groups), where NIC controls node boot
 
 ### What the operator configures
 
-An opt-in on the node group, using the block ADR-0021 reserves, and optionally a requirement:
+An opt-in on the node group, using the node-group `sandbox` block designed in §20.6, and optionally a requirement:
 
 ```yaml
 cluster:
@@ -88,7 +88,7 @@ sandbox:
     - capability: in-pod-namespaces
 ```
 
-Requesting the capability on a node group whose provider or image cannot provide it is a validation error. As with ADR-0021, NIC knows which images qualify from a table, and an image enters it only after a manual probe run on that image confirms the capability (user namespaces allowed, no AppArmor, or NIC's AppArmor profile loaded).
+Requesting the capability on a node group whose provider or image cannot provide it is a validation error. Unlike ADR-0021, which relies on a kernel floor because nearly every image qualifies, this capability depends on more than the kernel version (user namespaces allowed, AppArmor policy, boot-time profiles), so NIC knows which images qualify from a table of its own, and an image enters it only after a manual probe run on that image confirms the capability (user namespaces allowed, no AppArmor, or NIC's AppArmor profile loaded).
 
 ### What NIC does
 
@@ -96,7 +96,7 @@ Requesting the capability on a node group whose provider or image cannot provide
 2. **Boot-time node configuration.** The node's bootstrap writes the seccomp profile files into the kubelet's seccomp directory and sets the kubelet's `seccompDefault: true`, before the kubelet starts. Nodes are therefore ready the moment they join, including replacement and autoscaled nodes, with no installer and no readiness barrier.
 3. **A versioned seccomp profile.** NIC owns a complete `Localhost` profile, `nebari-sandbox-v1` (a `Localhost` profile replaces `RuntimeDefault` rather than extending it, so NIC maintains the full allowlist per architecture). It permits the namespace syscalls, makes `clone3` fail so programs fall back to the filterable `clone`, blocks netfilter configuration, and keeps denying the syscall families that widen the kernel surface reachable from a user namespace; mount-related kernel bugs are covered only by patching. A change is a new version (`-v2`) shipped alongside the old ones, reaching nodes through a node-group rolling update that ends users' running sessions on each node; if a fix ever has to land faster, the planned mechanism is a minimal in-node writer added by amending this ADR. Old versions stay until declared consumers have migrated or the operator retires them. The full contents are in [§20.9](../design-doc/implementation/20-workload-sandboxing.md#qualified-configurations-and-profile-contents-adr-0022).
 4. **Admission.** The provider installs a small ValidatingAdmissionPolicy chart the way providers already install conditional charts (following [ADR-0006](0006-conditional-foundational-software-helm.md)'s provider-driven approach); in hardened mode, ADR-0010's admission policy does the same job. Only namespaces labelled for the capability may reference `nebari-sandbox-v*` or tolerate the dedication taint, and only cluster administrators (including ArgoCD, so GitOps repository write grants it, consistent with ADR-0010) may set that label. Wildcard tolerations and direct node assignment onto these nodes are rejected from unlabelled workload namespaces, with `kube-system` and NIC's foundational namespaces exempt because system DaemonSets rely on wildcard tolerations. Full policy in [§20.9](../design-doc/implementation/20-workload-sandboxing.md#adr-0022-admission-policy-and-alternatives-in-full).
-5. **Deploy-time check.** As in ADR-0021, `nic deploy` checks live nodes against the node group's prediction. For this capability it also reads each sandbox node's kubelet configuration through the API (`/api/v1/nodes/<node>/proxy/configz`, no pod needed) and confirms `seccompDefault` is on, so a node whose bootstrap failed is reported. A node missing the profile file fails safe: pods that reference the profile do not start there. Results go into the readiness record, shown by `nic outputs`.
+5. **Deploy-time check.** `nic deploy` checks live nodes against the node group's prediction (kernel version and OS image from `node.status.nodeInfo`), alongside ADR-0021's kernel check. For this capability it also reads each sandbox node's kubelet configuration through the API (`/api/v1/nodes/<node>/proxy/configz`, no pod needed) and confirms `seccompDefault` is on, so a node whose bootstrap failed is reported. A node missing the profile file fails safe: pods that reference the profile do not start there. Results are shown by `nic outputs`.
 
 ### Concrete work this implies
 
