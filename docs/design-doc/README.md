@@ -62,6 +62,9 @@ Detailed implementation specifications and technical designs.
 11. **[Nebari Operator](implementation/11-nebari-operator.md)**
     How NIC deploys the out-of-tree operator that reconciles the `NebariApp` CRD
 
+20. **[Workload Sandboxing](implementation/20-workload-sandboxing.md)**
+    Sandbox capabilities for software packs: spectrum, provider findings, delivery, verification and security (design behind ADR-0021)
+
 ### Operations
 
 Testing, deployment, and operational procedures.
