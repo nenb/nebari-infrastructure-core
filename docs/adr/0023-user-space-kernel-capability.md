@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT). Builds on [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md), which defines the capability contract and reserves the name `user-space-kernel`, and on [ADR-0022](0022-in-pod-namespaces-capability.md), whose "Next steps" name this capability as the preferred way to strengthen `in-pod-namespaces`; this ADR cannot be accepted before them. Evidence so far is from a local probe; the provider runs are specified in the sandbox probe brief.
+Proposed (DRAFT). Builds on [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md), which defines the capability contract and reserves the name `user-space-kernel`, and on [ADR-0022](0022-in-pod-namespaces-capability.md), whose "Next steps" name this capability as the preferred way to strengthen `in-pod-namespaces`; this ADR cannot be accepted before them. Evidence: a local probe (2026-10-17) and an EKS 1.34 run with gVisor installed by a test-only DaemonSet (2026-10-19); installation at node boot, autoscaling and Hetzner are not yet tested.
 
 ## Date
 
@@ -29,7 +29,18 @@ On an Ubuntu 24.04 VM (kernel 6.8, arm64; the OS and kernel Hetzner uses) with D
 - gVisor ignores the pod's seccomp profile unless configured with `--oci-seccomp`; with it, `RuntimeDefault` blocks bubblewrap.
 - JupyterLab startup and notebook execution ran with little overhead (about 0.1–0.25 s). Metadata-heavy work on an NFS-backed home directory was 1.5–2.3× slower than without gVisor, on top of network latency that already made it slow; large sequential I/O was unaffected.
 
-None of this has yet been observed on x86 provider nodes, through a Kubernetes `RuntimeClass`, or with EFS.
+### What an EKS probe showed
+
+On an EKS 1.34 cluster deployed with NIC (AL2023 x86, kernel 6.12, containerd 2.3.5; 2026-10-19), with gVisor `release-20261012.0` installed on one node group behind a `RuntimeClass`:
+
+- Every bubblewrap result above held, including the `--unshare-net` failure and its workaround, the fresh `/proc`, `RuntimeDefault` being ignored, and Landlock's absence.
+- The node's `status.runtimeHandlers` listed `runsc` once containerd was configured, so the deploy check can read it without running a pod.
+- With NetworkPolicy enforcement turned on in the VPC CNI (it is off in NIC's EKS clusters today, see #691), default-deny egress blocked gVisor pods exactly as it blocked runc pods, and an allow rule restored only the allowed destination.
+- Secret and ConfigMap updates reached gVisor pods within the kubelet's sync period (about 45 s in this run).
+- The instance metadata service was unreachable from gVisor pods, because NIC's EKS node groups require IMDSv2 with a hop limit of 1.
+- With home directories on EFS, metadata-heavy work was 1.5–1.8× slower under gVisor than under runc (for example `pip install` 192 s against 132 s), on top of EFS latency that already dominated; JupyterLab started about 0.7 s slower.
+- **EFS access points broke gVisor pods.** With NIC's `efs-sc` storage class, each volume's access point owns its directory as its own UID (50000 and up) with mode 700. A runc pod running as UID 1000 can write there, because the kernel's NFS client leaves the decision to EFS, which maps every request to the access point's UID. gVisor checks permissions itself against the owner and refuses. A storage class whose access points use the pod's UID and GID worked under both runtimes.
+- The gVisor release ships as one archive per architecture; `runsc` needs the `gvisor-bin/` helper binaries from it (including `gvisor_sentry`) installed beside it.
 
 ### Precedents
 
@@ -78,14 +89,15 @@ No node-group setting is needed: gVisor relaxes nothing on the host, so it can b
 ### What NIC does
 
 1. **`nic validate`.** Each provider reports in `InfraSettings.Sandbox` whether it can install the runtime: AWS and Hetzner yes; Azure no (AKS's native option is Kata, which belongs to `vm-boundary`); `existing` and kind unknown. A known "no" with the capability required is an error.
-2. **Installation at node boot.** When the capability is required, the provider installs a pinned gVisor release (`runsc` and its containerd shim, checksum-verified as NIC already does for `hetzner-k3s`) and registers a containerd runtime handler `runsc` before the kubelet starts:
+2. **Installation at node boot.** When the capability is required, the provider installs a pinned gVisor release (the release archive, checksum-verified as NIC already does for `hetzner-k3s`, providing `runsc`, its `gvisor-bin/` helpers and the containerd shim) and registers a containerd runtime handler `runsc` before the kubelet starts:
    - **AWS:** through each node group's bootstrap (a nodeadm `NodeConfig` adding the containerd runtime handler, plus a pre-bootstrap step installing the binaries), so replacement and autoscaled nodes are ready when they join.
    - **Hetzner:** through hetzner-k3s's cluster-wide pre-k3s commands and k3s's containerd configuration template. Cluster-wide commands also reach autoscaled nodes, which per-pool commands currently do not.
 
-   gVisor runs in its default mode (systrap), which needs no hardware virtualisation, and without `--oci-seccomp`.
+   The handler is added to containerd's version 3 configuration (`plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc` with `runtime_type = "io.containerd.runsc.v1"`); AL2023's containerd configuration has no drop-in directory, so on AWS it goes through nodeadm's containerd configuration merge. gVisor runs in its default mode (systrap), which needs no hardware virtualisation, and without `--oci-seccomp`.
 3. **The `RuntimeClass`.** After bootstrap, NIC creates a `RuntimeClass` named `gvisor` with handler `runsc` and a fixed per-pod `overhead`, measured during qualification, so the scheduler accounts for gVisor's memory. It needs no `scheduling` field, because every node group has the runtime.
-4. **`nic deploy` check.** NIC confirms the `RuntimeClass` exists and, on nodes whose container runtime reports it (`node.status.runtimeHandlers`, containerd 2.x), that `runsc` is listed; a node without it fails the deploy when the capability is required. For `existing` and kind clusters NIC installs nothing and checks only that a `RuntimeClass` named `gvisor` exists. Results are shown by `nic outputs`.
+4. **`nic deploy` check.** NIC confirms the `RuntimeClass` exists and that each node's `status.runtimeHandlers` lists `runsc` (reported by containerd 2.x, as on EKS AL2023); a node without it fails the deploy when the capability is required. For `existing` and kind clusters NIC installs nothing and checks only that a `RuntimeClass` named `gvisor` exists. Results are shown by `nic outputs`.
 5. **Published pod settings:** `runtimeClassName: gvisor`, `seccompProfile` unset (gVisor ignores it, and NIC does not enable `--oci-seccomp`). When `in-pod-namespaces` is also required, its published settings on this cluster include the same `runtimeClassName`, and its deploy check is satisfied by gVisor instead of ADR-0022's host checks. That is how Hetzner gains `in-pod-namespaces`.
+6. **Storage for gVisor pods.** Volumes that gVisor pods write to must present files owned by the pod's UID, because gVisor enforces file permissions itself. For EFS, NIC configures the storage class used for home directories so its access points use the pod's UID and GID (the EFS CSI driver's `uid` and `gid` parameters), or provides a separate storage class for gVisor workloads; packs document the UID their pods run as. NIC's current `efs-sc` defaults (a per-volume UID from 50000 with mode 700) do not work under gVisor.
 
 ### What a pack does
 
@@ -100,7 +112,7 @@ Before a provider and node image family are listed, a maintainer runs the probe 
 - **Stronger than ADR-0021 and ADR-0022, but not a VM.** gVisor is a user-space kernel sharing the host; an escape from gVisor reaches the host. Code an agent executes should still be treated as attacker-influenced.
 - **No host relaxation and no privileged pods.** Installation happens at boot, outside the cluster; the gVisor binaries are pinned and checksum-verified, so NIC takes on supply-chain responsibility for them and must follow gVisor security releases.
 - **Shared nodes.** gVisor pods share nodes with foundational services. That fits ADR-0021's threat model; operators who want GKE-style separation can dedicate node groups (Option 3, an open question below).
-- **Network.** gVisor uses its own network stack inside the pod, but traffic leaves through the pod's normal interface, so NetworkPolicy should apply as for other pods; this is verified, not assumed. The instance metadata service remains reachable from the pod unless the node group's hop limit or a NetworkPolicy prevents it.
+- **Network.** gVisor uses its own network stack inside the pod, but traffic leaves through the pod's normal interface, and NetworkPolicy applies as for other pods (observed on EKS with VPC CNI enforcement on). On AWS the instance metadata service is unreachable from pods because NIC's node groups require IMDSv2 with a hop limit of 1; on Hetzner it depends on the provider's metadata service and NetworkPolicy.
 - **Composition.** Landlock does not work inside gVisor, so `process-self-restriction` does not combine with this capability.
 
 ### Consequences
@@ -112,6 +124,7 @@ Before a provider and node image family are listed, a maintainer runs the probe 
 
 **Bad:**
 - I/O overhead and compatibility gaps for some workloads; metadata-heavy work on network storage is the most visible cost.
+- Storage classes must give gVisor pods files owned by their UID: NIC's current EFS access-point defaults do not work.
 - Limited GPU support: GPU pods under gVisor need its `nvproxy` support, which this ADR does not qualify.
 - No AKS support; AKS needs `vm-boundary` instead.
 - NIC owns gVisor installation in each provider's bootstrap, version pinning, checksum verification and upgrades (which replace nodes and end users' sessions on them).
@@ -131,7 +144,8 @@ Before a provider and node image family are listed, a maintainer runs the probe 
 ## Open Questions
 
 - Should the default be dedicated, tainted node groups (Option 3) rather than every node group?
-- Is `node.status.runtimeHandlers` reported reliably on EKS AL2023 and k3s nodes, or does the deploy check need a short-lived smoke pod?
+- Does k3s on Hetzner report `node.status.runtimeHandlers` as EKS AL2023 does, or does the deploy check need a short-lived smoke pod there?
+- Should NIC change `efs-sc` itself to use a fixed UID and GID for all clusters, or add a separate storage class only when this capability is required?
 - What fixed `overhead` should the `RuntimeClass` declare?
 - Should NIC publish a structured hint for the bubblewrap network-namespace workaround, or only document it until gVisor #13438 is fixed?
 - Should GPU node groups qualify with `nvproxy`, and arm64 (Graviton) node groups?
