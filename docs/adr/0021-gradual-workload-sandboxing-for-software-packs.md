@@ -34,9 +34,11 @@ Full rows, notes on egress, credentials, observability and GPUs, and the analysi
 
 ### Why row 2 needs NIC
 
-Row 2 needs no changes to the pod's security settings, but needs node kernels with Landlock enabled at a sufficient ABI, which packs cannot choose. On current defaults this is nearly always met: on EKS, AMIs for Kubernetes 1.33 and later use a qualifying kernel (6.12); on Hetzner, the default Ubuntu 24.04 image qualifies (6.8); on AKS, Kubernetes 1.35 and later move to Ubuntu 24.04 (6.8). The exceptions are older Kubernetes versions (EKS 1.31–1.32 at 6.1, AKS below 1.35 at 5.15) and images an operator pins ([§20.4](../design-doc/implementation/20-workload-sandboxing.md#204-why-row-2-process-self-restriction-needs-nic)).
+Row 2 needs no changes to the pod's security settings, but needs node kernels with Landlock enabled at a sufficient ABI, which packs cannot choose. On current defaults this is nearly always met: on EKS, AMIs for Kubernetes 1.33 and later use a qualifying kernel (6.12); on Hetzner, the default Ubuntu 24.04 image qualifies (6.8; a local probe on that kernel saw Landlock active at boot at ABI 4); on AKS, Kubernetes 1.35 and later move to Ubuntu 24.04 (6.8). The exceptions are older Kubernetes versions (EKS 1.31–1.32 at 6.1, AKS below 1.35 at 5.15) and images an operator pins ([§20.4](../design-doc/implementation/20-workload-sandboxing.md#204-why-row-2-process-self-restriction-needs-nic)).
 
 So NIC does not need to discover which nodes qualify one by one. Its job is to **promise** a kernel floor on the node images it provisions, back the promise with evidence, and **stop** a deploy that requires the capability on a cluster that cannot meet it.
+
+**Precedents.** Managed platforms expose sandboxing in the same shape: GKE Sandbox enables gVisor per node pool and pods opt in with `runtimeClassName`; AKS Pod Sandboxing does the same with Kata; OpenShift admits workloads to security profiles through Security Context Constraints. Each names a capability, provides it on some nodes, and lets workloads request it. NIC's contract follows that shape while staying provider-neutral, and starts with a capability that needs no new runtime at all.
 
 This is an ADR rather than documentation because it changes NIC's public interfaces, which packs and operators will depend on: a new `InfraSettings.Sandbox` field, a top-level `sandbox.require` config field, and a support policy NIC commits to keep. It also fixes the naming convention later sandboxing capabilities will use.
 
@@ -88,7 +90,7 @@ The contract is an interface to the **node execution environment**: NIC states, 
          minLandlockABI: 4
    ```
 
-   **`nic validate`** compares the requirement with the provider's floor, offline and before any infrastructure exists, and errors if the floor is known and too low. Without `sandbox.require` it reports nothing.
+   **`nic validate`** compares the requirement with the provider's floor, offline and before any infrastructure exists, and errors if the floor is known and too low. Without `sandbox.require` it reports nothing. The floor is transitional: once every supported Kubernetes version on every provider qualifies, this comparison can no longer fail and can be removed, leaving the deploy-time check.
 3. **The deploy-time check.** Once the cluster is up, **`nic deploy`** reads each node's kernel version from the Kubernetes API (`node.status.nodeInfo.kernelVersion`) and converts it to the Landlock ABI that kernel version introduces upstream. A node below the requirement fails the deploy; a node below the floor when nothing is required is a warning. The result per node group is shown by `nic outputs`. This also covers nodes the floor cannot predict: pinned images, `existing` clusters and kind.
 4. **Consumer integration.** Packs need no node selectors: on a cluster that meets the floor, any node will do. Packs check the Landlock ABI at startup, as every Landlock consumer must, and refuse sandboxed work rather than running unsandboxed when it is missing or too low. NIC documents this for pack developers, alongside an operator page listing which provider and version combinations qualify. Enforcing pack requirements is future work tied to [ADR-0003](0003-software-pack-codegen.md) and #670.
 
@@ -120,6 +122,7 @@ The deploy-time check is an **inference, not an observation**: a kernel version 
 - The checks are inferences from version numbers: they cannot see Landlock disabled at boot or kernels with backported features, and nodes added after a deploy are not checked.
 - A deploy-time failure happens after infrastructure exists; `nic validate` catches the common case first.
 - NIC maintainers keep each provider's floor current and rerun the probe when a provider changes kernel line.
+- It does not combine with every later capability: gVisor does not implement Landlock, so packs cannot use it inside a `user-space-kernel` pod ([§20.12](../design-doc/implementation/20-workload-sandboxing.md#2012-composition-and-privilege-tiers-for-later-capabilities)).
 - The contract's shape is fixed before a second capability exists, so later capabilities must fit it or amend it.
 - Pack integration is manual until ADR-0003 exists.
 
