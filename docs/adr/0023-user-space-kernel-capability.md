@@ -67,7 +67,7 @@ GKE Sandbox installs gVisor on chosen node pools and pods opt in with `runtimeCl
 
 ## Decision Outcome
 
-Chosen option: "Option 2", because it delivers a stronger boundary than ADR-0021 and ADR-0022 with no host relaxation, reaches Hetzner as well as AWS, uses a filter the gVisor project maintains, and needs the least configuration: the operator only adds a requirement.
+Chosen option: "Option 2", because it delivers a stronger boundary than ADR-0021 and ADR-0022 with no host relaxation, can reach Hetzner as well as AWS, uses a filter the gVisor project maintains, and needs the least configuration: the operator only adds a requirement.
 
 ### The capability
 
@@ -96,8 +96,22 @@ No node-group setting is needed: gVisor relaxes nothing on the host, so it can b
    The handler is added to containerd's version 3 configuration (`plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc` with `runtime_type = "io.containerd.runsc.v1"`); AL2023's containerd configuration has no drop-in directory, so on AWS it goes through nodeadm's containerd configuration merge. gVisor runs in its default mode (systrap), which needs no hardware virtualisation, and without `--oci-seccomp`.
 3. **The `RuntimeClass`.** After bootstrap, NIC creates a `RuntimeClass` named `gvisor` with handler `runsc` and a fixed per-pod `overhead`, measured during qualification, so the scheduler accounts for gVisor's memory. It needs no `scheduling` field, because every node group has the runtime.
 4. **`nic deploy` check.** NIC confirms the `RuntimeClass` exists and that each node's `status.runtimeHandlers` lists `runsc` (reported by containerd 2.x, as on EKS AL2023); a node without it fails the deploy when the capability is required. For `existing` and kind clusters NIC installs nothing and checks only that a `RuntimeClass` named `gvisor` exists. Results are shown by `nic outputs`.
-5. **Published pod settings:** `runtimeClassName: gvisor`, `seccompProfile` unset (gVisor ignores it, and NIC does not enable `--oci-seccomp`). When `in-pod-namespaces` is also required, its published settings on this cluster include the same `runtimeClassName`, and its deploy check is satisfied by gVisor instead of ADR-0022's host checks. That is how Hetzner gains `in-pod-namespaces`.
+5. **Published pod settings:** `runtimeClassName: gvisor`, `seccompProfile` unset (gVisor ignores it, and NIC does not enable `--oci-seccomp`). These are this capability's settings only: requiring `user-space-kernel` does not change the published settings of any other capability (see "Combining capabilities").
 6. **Storage for gVisor pods.** Volumes that gVisor pods write to must present files owned by the pod's UID, because gVisor enforces file permissions itself. For EFS, NIC configures the storage class used for home directories so its access points use the pod's UID and GID (the EFS CSI driver's `uid` and `gid` parameters), or provides a separate storage class for gVisor workloads; packs document the UID their pods run as. NIC's current `efs-sc` defaults (a per-volume UID from 50000 with mode 700) do not work under gVisor.
+
+### Combining capabilities
+
+Each capability's published settings mean the same thing on every cluster that provides it, and a capability never silently pulls in another. A pack that wants several applies each one's settings, so running bubblewrap inside gVisor is a choice the pack makes, not a side effect of the operator's configuration:
+
+| The pack wants | It applies the settings of | Result |
+|---|---|---|
+| Bubblewrap only | `in-pod-namespaces` | Bubblewrap on the host kernel, where the host provides it (AL2023); no gVisor |
+| Bubblewrap inside gVisor | `user-space-kernel` and `in-pod-namespaces` | Bubblewrap inside gVisor: the qualified consumer of this capability |
+| gVisor only | `user-space-kernel` | The pod runs under gVisor with no inner sandbox |
+| Landlock and bubblewrap | `process-self-restriction` and `in-pod-namespaces` | Host kernel (AL2023) |
+| Landlock and gVisor | `process-self-restriction` and `user-space-kernel` | Not supported: Landlock is unavailable inside gVisor. Documented, and caught by the pack's startup check |
+
+`in-pod-namespaces` inside a gVisor pod needs nothing from the host, so on a cluster that provides `user-space-kernel` the combination of both is available even where `in-pod-namespaces` alone is not. **Where the host cannot provide `in-pod-namespaces` (Hetzner), NIC does not advertise it on its own:** a pack there requires `user-space-kernel` and `in-pod-namespaces` together, and `nic validate` reports a requirement for `in-pod-namespaces` without `user-space-kernel` on such a provider as an error that names the combination. ADR-0022's host checks apply only to `in-pod-namespaces` used on its own; when both capabilities are required, the inner capability is checked as part of `user-space-kernel`.
 
 ### What a pack does
 
@@ -119,7 +133,7 @@ Before a provider and node image family are listed, a maintainer runs the probe 
 
 **Good:**
 - A much stronger boundary between the pod and the host, maintained upstream, with no host relaxation, no taints and no in-cluster installer.
-- `in-pod-namespaces` reaches Hetzner, and gains a fresh `/proc` and pid namespace, closing ADR-0022's signalling and command-line gaps.
+- Bubblewrap inside gVisor reaches Hetzner, where `in-pod-namespaces` alone cannot, and gains a fresh `/proc` and pid namespace, closing ADR-0022's signalling and command-line gaps.
 - The operator adds one line of config; packs add `runtimeClassName`.
 
 **Bad:**
