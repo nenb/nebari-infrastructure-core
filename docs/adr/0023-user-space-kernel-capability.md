@@ -74,7 +74,7 @@ Chosen option: "Option 3", because it delivers a stronger boundary than ADR-0021
 
 **`user-space-kernel`:** a pod that sets the `runtimeClassName` NIC publishes for this capability runs behind a user-space kernel that implements the Linux syscall interface, so the workload does not call the host kernel directly. The guarantee names no product; gVisor is its first implementation.
 
-The qualified consumer is a JupyterLab-style pod, non-root with every capability dropped, running ADR-0022's qualified bubblewrap configurations inside it with the network-namespace workaround, and with `--unshare-pid --proc /proc` added.
+The qualified consumer is a JupyterLab-style pod, non-root with every capability dropped, running ADR-0022's qualified bubblewrap configurations inside it unchanged (they already create the network namespace with `unshare` and add a pid namespace, a form that works on runc and gVisor alike), optionally with `--proc /proc` in place of the read-only `/proc` bind, which only gVisor allows.
 
 ### What the operator configures
 
@@ -129,7 +129,7 @@ Each capability's published settings mean the same thing on every cluster that p
 
 ### What a pack does
 
-It sets the published `runtimeClassName` on the pod that runs the agent and applies the other published settings as given. If it uses bubblewrap inside the pod, it creates the network namespace with `unshare` before calling bubblewrap without `--unshare-net` until gVisor #13438 is fixed, adds `--unshare-pid --proc /proc`, checks at startup that the sandbox works, and refuses to run commands unsandboxed if it does not. It must not rely on Landlock inside the gVisor pod. Environments and package caches belong on local or ephemeral storage rather than a network-backed home directory, where metadata-heavy work is slow with or without gVisor.
+It sets the published `runtimeClassName` on the pod that runs the agent and applies the other published settings as given. If it uses bubblewrap inside the pod, it uses ADR-0022's qualified configurations as they are, so the same pack code runs on runc and under gVisor without detecting which; under gVisor it may add a fresh `/proc` (`--proc /proc`) to hide other processes' command lines. It checks at startup that the sandbox works, and refuses to run commands unsandboxed if it does not. It must not rely on Landlock inside the gVisor pod. Environments and package caches belong on local or ephemeral storage rather than a network-backed home directory, where metadata-heavy work is slow with or without gVisor.
 
 ### Verification
 
@@ -143,6 +143,7 @@ Before a provider and node image family are listed, a maintainer runs the probe 
 - **Network.** gVisor uses its own network stack inside the pod, but traffic leaves through the pod's normal interface, and NetworkPolicy applies as for other pods (observed on EKS with VPC CNI enforcement on). On AWS the instance metadata service is unreachable from pods because NIC's node groups require IMDSv2 with a hop limit of 1; on Hetzner it depends on the provider's metadata service and NetworkPolicy.
 - **Storage endpoints.** gVisor does not stop a pod from talking to network storage directly. NFS endpoints that trust the user ID a client claims (FSx for OpenZFS as configured in #705, with an export open to any client and `no_root_squash`, and Longhorn's share-manager) can be reached by a user-space NFS client without any mount privilege, so a process in the pod may be able to read or change other users' homes. This is inferred, not yet tested. The sandbox's no-network configuration blocks it for the agent's commands; for the pod itself, the storage endpoint must be restricted to nodes or blocked by NetworkPolicy, which NIC's EKS clusters do not enforce today (#691, #675).
 - **Composition.** Landlock does not work inside gVisor, so `process-self-restriction` does not combine with this capability.
+- **Seccomp settings are ignored, and compliance tools will not notice.** NIC runs gVisor without `--oci-seccomp`, so a gVisor pod's `seccompProfile` is not applied: a pod can declare `RuntimeDefault`, pass a Pod Security or policy check that requires it, and run without that filter. The workload is still behind gVisor's own syscall implementation and its host-side filter, which is the stronger boundary, but the declared setting is not what is enforced. Documentation for hardened mode ([ADR-0010](0010-high-security-mode.md)) and for auditors says so. Enabling `--oci-seccomp` would make declared profiles real, at the cost of blocking bubblewrap under `RuntimeDefault`; it is not chosen, and is recorded here for operators who need declared profiles enforced.
 
 ### Consequences
 
@@ -159,7 +160,7 @@ Before a provider and node image family are listed, a maintainer runs the probe 
 - No AKS support; AKS needs `vm-boundary` instead.
 - NIC owns gVisor installation in each provider's bootstrap, a published gVisor image, version pinning, checksum verification and upgrades (which replace the opted-in nodes and end users' sessions on them).
 - Operators size the opted-in node groups for agent sessions; Hetzner needs node-pool label support in NIC's provider.
-- The bubblewrap workaround is a wart in pack code until gVisor #13438 is fixed.
+- Bubblewrap's own `--unshare-net` stays unusable under gVisor until gVisor #13438 is fixed; the qualified configurations avoid it on every runtime.
 - Landlock is unavailable inside gVisor pods.
 
 ## Options Detail
@@ -178,7 +179,7 @@ Before a provider and node image family are listed, a maintainer runs the probe 
 - Does k3s on Hetzner report `node.status.runtimeHandlers` as EKS AL2023 does, or does the deploy check need a short-lived smoke pod there?
 - Do FSx for OpenZFS (with the kubelet applying `fsGroup`) and Longhorn's shared volumes behave under gVisor as the ownership analysis predicts, including setgid directories and group writes?
 - What fixed `overhead` should the `RuntimeClass` declare?
-- Should NIC publish a structured hint for the bubblewrap network-namespace workaround, or only document it until gVisor #13438 is fixed?
+
 - Should GPU node groups qualify with `nvproxy`, and arm64 (Graviton) node groups?
 - Does this capability make ADR-0022's first implementation unnecessary on AWS, or should both remain (host bubblewrap without gVisor's overhead, and bubblewrap inside gVisor)?
 
