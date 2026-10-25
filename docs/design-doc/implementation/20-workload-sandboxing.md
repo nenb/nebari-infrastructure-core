@@ -258,6 +258,48 @@ This is ADR-0022's fallback (Option 4), recorded from the earlier draft of the A
 - **At deploy:** the consistency check described above.
 - **Consumer acceptance, before the first delivery:** a consumer must show, with the capability in use, that credential canaries in the agent's environment, files and mounted secrets are unreadable by sandboxed commands, inherited descriptors are closed or allowed, networking is denied or limited to the pack's proxy, the instance metadata service is unreachable, its pod settings are correct, and it refuses unsandboxed fallback. Until an upstream pack adopts the capability, a small reference consumer in NIC's user-journey tests fulfils this.
 
+### ADR-0023: probe evidence in full
+
+ADR-0023 summarises these results in a table; the run-by-run detail is recorded here.
+
+#### Local probe (2026-10-17)
+
+On an Ubuntu 24.04 VM (kernel 6.8, arm64; the OS and kernel Hetzner uses) with Docker and gVisor `release-20261012.0`, non-root and with every capability dropped (2026-10-17; `tests/sandbox-probe/gvisor-local/`):
+
+- Bubblewrap's qualified configurations from ADR-0022 work inside gVisor and hide environment, home-directory and service-account canaries, sockets outside the bound paths, and the network (including `169.254.169.254`), with one workaround: bubblewrap's own `--unshare-net` fails because gVisor pre-configures the new namespace's loopback ([gVisor #13438](https://github.com/google/gvisor/issues/13438), open; [bubblewrap #745](https://github.com/containers/bubblewrap/issues/745), open). Creating the network namespace first with `unshare --user --map-current-user --net` and running bubblewrap without `--unshare-net` works.
+- A sandbox can have its own pid namespace and a fresh `/proc`, which a normal container cannot. That closes the two limits ADR-0022 states: sandboxed commands can no longer signal the agent or read other processes' command lines.
+- Landlock is not available inside gVisor (`ENOSYS`).
+- gVisor ignores the pod's seccomp profile unless configured with `--oci-seccomp`; with it, `RuntimeDefault` blocks bubblewrap.
+- JupyterLab startup and notebook execution ran with little overhead (about 0.1–0.25 s). Metadata-heavy work on an NFS-backed home directory was 1.5–2.3× slower than without gVisor, on top of network latency that already made it slow; large sequential I/O was unaffected.
+
+#### EKS probe (2026-10-19)
+
+On an EKS 1.34 cluster deployed with NIC (AL2023 x86, kernel 6.12, containerd 2.3.5; 2026-10-19), with gVisor `release-20261012.0` installed on one node group behind a `RuntimeClass`:
+
+- Every bubblewrap result above held, including the `--unshare-net` failure and its workaround, the fresh `/proc`, `RuntimeDefault` being ignored, and Landlock's absence.
+- The node's `status.runtimeHandlers` listed `runsc` once containerd was configured. (The 2026-10-25 run showed this is not proof of a working install; see below.)
+- With NetworkPolicy enforcement turned on in the VPC CNI (it is off in NIC's EKS clusters today, see #691), default-deny egress blocked gVisor pods exactly as it blocked runc pods, and an allow rule restored only the allowed destination.
+- Secret and ConfigMap updates reached gVisor pods within the kubelet's sync period (about 45 s in this run).
+- The instance metadata service was unreachable from gVisor pods, because NIC's EKS node groups require IMDSv2 with a hop limit of 1.
+- With home directories on EFS, metadata-heavy work was 1.5–1.8× slower under gVisor than under runc (for example `pip install` 192 s against 132 s), on top of EFS latency that already dominated; JupyterLab started about 0.7 s slower.
+- **EFS access points broke gVisor pods.** With NIC's `efs-sc` storage class, each volume's access point owns its directory as its own UID (50000 and up) with mode 700. A runc pod running as UID 1000 can write there, because the kernel's NFS client leaves the decision to EFS, which maps every request to the access point's UID. gVisor checks permissions itself against the owner and refuses. A storage class whose access points use the pod's UID and GID worked under both runtimes.
+- The gVisor release ships as one archive per architecture; `runsc` needs the `gvisor-bin/` helper binaries from it (including `gvisor_sentry`) installed beside it.
+
+#### Hetzner and EKS-with-FSx probe (2026-10-25)
+
+On a Hetzner cluster deployed with NIC (Ubuntu 24.04, kernel 6.8, k3s with containerd 2.2) and an EKS 1.34 cluster with FSx for OpenZFS from [#705](https://github.com/nebari-dev/nebari-infrastructure-core/pull/705) (2026-10-25):
+
+- **Bubblewrap inside gVisor works on Hetzner** with ADR-0022's single qualified configuration: canaries, the agent's socket, the network and the metadata address hidden, signalling blocked, and a fresh `/proc` showing only the sandbox's processes. On the same nodes, bubblewrap outside gVisor failed at AppArmor, as ADR-0022 predicts.
+- **Installation at boot works on both providers.** On Hetzner, a cluster-wide pre-k3s command that acted only on nodes of opted-in pools installed gVisor and the k3s containerd template, including on a node the autoscaler created from zero (pod pending to running in under two minutes); pool labels routed the pod. Hetzner's image lacks `bzip2`, which the release archive needs. On AWS, a node group's bootstrap (a nodeadm `NodeConfig` adding the runtime handler, plus a script) pulled gVisor as an image from ECR with `ctr` and installed it.
+- **A failed install is fail-safe but not visible to `runtimeHandlers`.** With a bad image tag, the node still joined; a gVisor pod sent there stayed in `ContainerCreating` (`failed to resolve runtime path`) rather than running unsandboxed. But the node still listed `runsc` in `status.runtimeHandlers`, which reflects containerd's configuration, not the installed binary. The probe's own install script also logged success after the failure, because shell error handling (`set -e`) is ignored inside a `( … ) || …` construct.
+- **k3s reports `status.runtimeHandlers`**, with `runsc` listed only on nodes where it was configured.
+- **Storage:** FSx for OpenZFS homes (owned through the pod's `fsGroup`) and Longhorn shared and single-writer volumes were writable from gVisor pods, with setgid directories passing their group on, as the ownership analysis predicted. Longhorn shared volumes needed the NFS client installed on the node first (see "Findings for NIC beyond sandboxing").
+- **Compatibility:** under gVisor, pixi environments (about 1.5–2× slower to build on local disk), Python shared memory, a local Dask cluster, file watching, `debugpy`, C-extension builds, SQLite in WAL mode on the shared home, and headless Chromium with its own sandbox all worked. Attaching `gdb` to an unrelated running process was refused (gVisor reports `ptrace_scope` 1, as Ubuntu does); launching a program under `gdb` worked.
+- **Performance (median of three):** with an FSx home, `pip install` into a fresh environment took 65 s under gVisor against 46 s under runc, and 5,000 small-file operations 40 s against 24 s; with a Longhorn shared home on Hetzner, 141 s against 100 s and 84 s against 49 s. JupyterLab startup was 1–1.6 s slower; large sequential I/O was unchanged.
+- **Overhead:** an idle gVisor pod used about 18 MiB more memory than the same pod under runc.
+- **`dedicated: true`:** with the node group tainted and the `RuntimeClass` carrying the toleration, gVisor pods landed on it, an ordinary pod pinned there stayed pending, and system DaemonSets kept running.
+- **NetworkPolicy:** hetzner-k3s enforced it for gVisor pods as for runc pods.
+
 ## 20.10 Verification
 
 - **Per node group, then per node.** For `process-self-restriction`, NIC checks each node's kernel version against the requirement during `nic deploy`, and the probe runs only in maintainers' release testing unless automating it is adopted (§20.8). Where probes are used, they run on each node group that should provide a capability, placed with that capability's own selectors and tolerations. For Phase 2, the per-node probe also gates the readiness barrier.
