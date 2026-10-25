@@ -69,7 +69,7 @@ Where the providers stand on these layers. Entries marked *(unverified)* are inf
 | Provider | Layer 1 (node kernel) | Layer 2 (seccomp) | Layer 3 (AppArmor) | Layer 4 (pod user namespaces) |
 |---|---|---|---|---|
 | `aws` (AL2023) | OK (observed on EKS 1.34, 2026-10-19) | Blocked under `RuntimeDefault` (observed); no filter when unset | n/a (no AppArmor; SELinux permissive) | Masked: a fresh procfs fails (observed) |
-| `hetzner` (hetzner-k3s, Ubuntu 24.04) | Blocked by the AppArmor sysctl | Blocked under `RuntimeDefault`; profile needed | Profile needed | Example config pins Kubernetes 1.32 |
+| `hetzner` (hetzner-k3s, Ubuntu 24.04) | Restricted by the AppArmor sysctl (`apparmor_restrict_unprivileged_userns=1`, observed) | Blocked under `RuntimeDefault`; profile needed | Blocks `mount` (observed on NIC-deployed nodes, 2026-10-25) | Masked |
 | `azure` (AKS, Ubuntu 22.04) | Expected OK *(unverified)* | Blocked under `RuntimeDefault`; profile needed | Profile needed | 5.15 kernel; likely unsupported *(unverified)* |
 | `local` (kind) | Host-dependent | Blocked under `RuntimeDefault`; profile needed | kind runs its node containers with `apparmor=unconfined` and `seccomp=unconfined`; whether the containerd inside a node applies AppArmor to pods depends on the host (live test needed on Linux hosts with AppArmor; kind's known issues advise disabling interfering host profiles) | Host-dependent |
 | `existing` | Unknown | Blocked under `RuntimeDefault`; profile needed | Unknown | Unknown; detect only |
