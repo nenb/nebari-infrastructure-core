@@ -258,6 +258,41 @@ This is ADR-0022's fallback (Option 4), recorded from the earlier draft of the A
 - **At deploy:** the consistency check described above.
 - **Consumer acceptance, before the first delivery:** a consumer must show, with the capability in use, that credential canaries in the agent's environment, files and mounted secrets are unreadable by sandboxed commands, inherited descriptors are closed or allowed, networking is denied or limited to the pack's proxy, the instance metadata service is unreachable, its pod settings are correct, and it refuses unsandboxed fallback. Until an upstream pack adopts the capability, a small reference consumer in NIC's user-journey tests fulfils this.
 
+### ADR-0023: mechanisms in full
+
+ADR-0023 states these as requirements; the mechanisms are recorded here. Each is a design target, not yet implemented or tested as NIC code.
+
+**Artifact.** NIC publishes one OCI image per gVisor release and architecture, referenced by digest, containing the extracted `runsc`, `containerd-shim-runsc-v1` and `gvisor-bin/` helpers plus gVisor's published checksum of the release archive they came from. Shipping extracted binaries, not the compressed archive, removes the boot step's dependency on `bzip2`, which Hetzner's image lacks. NIC publishes to a public registry; operators with private registries mirror the image and point NIC's configuration at the mirror.
+
+**Boot-step dependency order (per provider).**
+
+1. Trust: on clusters with a `trust_bundle`, the node's OS trust store is installed first (NIC's existing pre-bootstrap hook on AWS), so a TLS-inspecting proxy does not break the fetch.
+2. Fetch tool and credentials: on AWS, the node's containerd (running before the kubelet on AL2023) and a registry login from the node role; `ctr` does not read the kubelet's credential providers or the CRI plugin's registry mirror configuration, so the step passes credentials and the mirror host explicitly. On Hetzner, a small static fetcher (for example `oras`) pulls the image's layer over HTTPS before k3s exists.
+3. Fetch by digest, with a bounded timeout and a fixed number of retries.
+4. Verify the checksum, then install the binaries.
+5. Register the runtime handler (nodeadm containerd configuration merge on AWS; k3s's `config-v3.toml.tmpl` with `{{ template "base" . }}` on Hetzner).
+6. On success only, write the ready label (below) and a marker file recording the installed release.
+
+The step's outcome is decided by the marker, not by shell error handling (`set -e` is ignored inside `( … ) || …`, which in the probe logged success after a failed pull).
+
+**Ready label.** The label `sandbox.nebari.dev/user-space-kernel-ready` carries the installed gVisor release (for example `"20261012.0"`) and is set at node registration only after a successful install: on k3s through `node-label` in `/etc/rancher/k3s/config.yaml`, which the pre-k3s step writes; on AL2023 through the kubelet's node labels before nodeadm starts the kubelet (the exact hook is an open question in ADR-0023). The `RuntimeClass` selects the release NIC currently pins, so a node on an older release, or with a failed install, receives no gVisor pods.
+
+**Scale-from-zero.** Cluster autoscaler decides whether a new node would fit a pending pod from the node group's template, not from labels nodes set at boot. Each opted-in group's template therefore declares the ready label with the pinned release: on AWS as an Auto Scaling group tag `k8s.io/cluster-autoscaler/node-template/label/sandbox.nebari.dev/user-space-kernel-ready`; on Hetzner in the autoscaler's node-group configuration that hetzner-k3s generates. Nodes still receive the real label only on success, so a node whose install failed joins without it.
+
+**Failed nodes.** The boot step retries a bounded number of times. A node that still has no ready label stays out of gVisor scheduling, is reported by `nic deploy` and `nic outputs`, and is replaced by the operator (on AWS by terminating the instance, which the managed node group replaces; on Hetzner by deleting the server, which hetzner-k3s or the autoscaler recreates). Automatic replacement is future work.
+
+**Upgrades, conversion, rollback and removal.**
+
+- AWS: changing the pinned release or opting a group in or out changes the node group's launch template, which the managed node group rolls out node by node. Running gVisor pods on each replaced node are evicted.
+- Hetzner: re-running `hetzner-k3s create` does not replace existing servers, so cloud-init changes do not reach them. Opting in an existing pool, upgrading, rolling back or opting out is done by draining and deleting the pool's nodes one at a time and letting hetzner-k3s or the autoscaler recreate them; NIC documents this and `nic deploy` reports nodes whose ready label does not match the pinned release.
+- Adding `dedicated: true` to a group taints its nodes but does not evict running pods; conversion includes a drain.
+
+**Longhorn with dedicated groups.** NIC's Longhorn install gives its manager, driver and system-managed components wildcard tolerations only when `longhorn.dedicated_nodes` is on (`pkg/storage/longhorn/install.go`). Longhorn's per-node components must run wherever pods mount Longhorn volumes, so they need tolerations for sandbox dedication taints regardless of where replicas live; that change in NIC's Longhorn install is a prerequisite for `dedicated: true` on clusters with colocated Longhorn, and dedication is qualified with real single-writer and shared PVCs, not only an `emptyDir` pod.
+
+**Optional smoke pod.** A pod with `runtimeClassName: gvisor`, pinned to one node, that passes only if `uname -r` reports gVisor's kernel; when a requirement asks for `in-pod-namespaces` within `user-space-kernel`, it also runs ADR-0022's capability test. It is deleted afterwards.
+
+**Support matrix.** `InfraSettings.Sandbox` reports qualification per provider, CPU architecture, node OS family and container runtime version (today: AWS AL2023 x86 with containerd 2.x, Hetzner Ubuntu 24.04 x86 with k3s's containerd 2.x), and `nic validate` rejects opted-in groups outside it.
+
 ### ADR-0023: probe evidence in full
 
 ADR-0023 summarises these results in a table; the run-by-run detail is recorded here.
