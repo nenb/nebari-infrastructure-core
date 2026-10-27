@@ -31,6 +31,7 @@ An ADR is a document that captures an important architectural decision made alon
 | [ADR-0023](0023-user-space-kernel-capability.md) | User-Space Kernel Sandboxes (`user-space-kernel`) with gVisor | Proposed | 2026-10-19 |
 | [ADR-0024](0024-immutable-node-pool-rollouts.md) | Immutable Node-Pool Rollouts | Proposed | 2026-10-27 |
 | [ADR-0025](0025-untrusted-execution-pods.md) | Guarantees for Untrusted-Execution Pods | Proposed | 2026-10-28 |
+| [ADR-0026](0026-vm-boundary-capability.md) | VM-Boundary Sandboxes (`vm-boundary`) with Kata Containers | Proposed | 2026-10-28 |
 
 ## ADR Statuses
 
