@@ -384,10 +384,6 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 - an unqualified hetzner-k3s binary or k3s release rejected before nodes are created;
 - pods under memory limits with the configured `RuntimeClass` overhead, at realistic sizes, and JupyterLab timings.
 
-**Stricter gVisor configuration (optional).** For operators who accept a performance cost for a smaller host interface, the runtime handler can turn directfs off, so file operations go through gVisor's separate file proxy (the gofer) rather than the sandbox opening host files directly, and, on nodes with nested virtualisation (ADR-0026), use gVisor's KVM platform instead of systrap, which adds hardware separation between the sandboxed code and gVisor's kernel. Neither has been probed with NIC's install; both change the runtime configuration, so they are part of a generation's stored spec (ADR-0024) and switching is a rollout. Directfs off slows file-heavy work, already the main cost on network homes; the KVM platform needs nested-virtualisation instance types. The setting is a property of the implementation, so a pack that requires it gets it or a loud failure.
-
-**GPUs.** gVisor's `nvproxy` can pass NVIDIA GPUs into sandboxes, but it exposes the GPU driver's large interface to untrusted code. The direction for agent workloads is to keep sandboxes CPU-only and reach models through a separate GPU or model-serving service over the network, under ADR-0025's egress rules. Qualifying `nvproxy` stays open for workloads that need GPUs inside the sandbox.
-
 **Support matrix.** `InfraSettings.Sandbox` reports qualification per provider, CPU architecture, node OS family and container runtime version (today: AWS AL2023 x86 and arm64 with containerd 2.x; Hetzner Ubuntu 24.04 x86, autoscaled pools only, with the k3s versions whose `config-v3.toml.tmpl` format the install targets, re-probed on each k3s upgrade), and `nic validate` rejects opted-in groups outside it.
 
 ### ADR-0023: probe evidence in full

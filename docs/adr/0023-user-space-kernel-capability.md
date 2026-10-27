@@ -131,8 +131,7 @@ Before a provider, architecture, OS family and toolchain are listed, and on ever
 ### Security
 
 - **Stronger than ADR-0021 and ADR-0022, but not a VM.** An escape from gVisor reaches the host and whatever else runs on the node, which without `dedicated: true` can include foundational services. Code an agent executes should be treated as attacker-influenced.
-- **gVisor's own trade-offs.** Its default *directfs* mode opens host files directly, and its *systrap* platform, needed without hardware virtualisation, lacks the extra isolation of its KVM platform. Operators may choose a stricter configuration, directfs off and, on nested-virtualisation nodes, the KVM platform (to be verified), at a performance cost (§20). NIC pins one gVisor release per NIC release and treats gVisor security releases like its own fixes.
-- **GPUs stay outside sandboxes.** Passing a GPU into a sandbox exposes large driver interfaces to untrusted code, so the direction is a separate GPU or model service that sandboxes call over the network, not device access inside them; `nvproxy` remains an open question for later.
+- **gVisor's own trade-offs.** Its default *directfs* mode opens host files directly, and its *systrap* platform, needed without hardware virtualisation, lacks the extra isolation of its KVM platform. NIC pins one gVisor release per NIC release and treats gVisor security releases like its own fixes.
 - **Patch status.** A node's release never changes, so every sandbox on it runs the release its label records. A rollout is complete when the old generation is retired; until then `nic outputs` reports the pool as partly patched.
 - **Network.** gVisor does not isolate a pod's network. Tool-execution sandboxes get it from ADR-0025's host-side default-deny, which on EKS held against root inside gVisor once enforcement was enabled (2026-10-27). Otherwise this ADR relies on no NetworkPolicy: on AWS the metadata service is unreachable (IMDSv2, hop limit 1), on Hetzner the capability waits for the NIC team's fix, and for bubblewrap inside gVisor the sandbox's no-network configuration blocks network storage for the agent's commands.
 - **Declared seccomp is not enforced.** Without `--oci-seccomp`, gVisor ignores the pod's `seccompProfile`, so `RuntimeDefault` satisfies policy checks without being enforced; gVisor's own syscall implementation and host-side filter apply instead. Documentation for hardened mode ([ADR-0010](0010-high-security-mode.md)) and for auditors says so; `--oci-seccomp` would block bubblewrap.
@@ -193,4 +192,3 @@ Found while probing for this ADR and reported to the NIC team (links to be added
 - [Kubernetes RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/)
 - [GKE Sandbox](https://cloud.google.com/kubernetes-engine/docs/concepts/sandbox-pods)
 - [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/)
-- [Luis Cardoso, "Sandboxes for AI" (2026)](https://www.luiscardoso.dev/blog/sandboxes-for-ai)
