@@ -50,15 +50,17 @@ A pool is **immutable** when a consumer ADR requires it; ADR-0023's opted-in poo
 1. **Stored generation specs.** NIC stores the full resolved spec of each immutable pool's current generation in a NIC-owned record in the cluster: instance type, node image release, every boot input (including the trust bundle and the consumer's inputs, such as ADR-0023's gVisor artifact digest), labels, taints and the NIC and module versions that rendered it. The generation is a hash of that rendered spec. NIC renders immutable groups **from their stored specs, never from the current config**; only a new generation is rendered from the config. A change to the config, a shared input or NIC itself that would alter an immutable pool's spec therefore creates a new generation, never an in-place change. While a rollout is unfinished, NIC refuses to run as a different version from the one that started it.
 2. **Barriers at the group level, present at registration.** A new generation is created with a staging taint (`node.nebari.dev/staging:NoSchedule`) in its group definition, which only verification pods and node-level DaemonSets tolerate. The old generation, when retired, gets a retiring taint (`node.nebari.dev/retiring:NoSchedule`) in its group definition, so nodes the provider launches to replace failed ones register already closed. Both are changed at the group level without replacing nodes. Tainting nodes through the API after they register is not a barrier, since work can land first.
 3. **Recorded intent before each step.** NIC records what it is about to do before doing it, and on every run reconciles the record with what it observes (groups, nodes, taints, pods) before any destructive action. Promotion is the critical step: NIC records `promoting` before removing the staging taint, and from then on the new generation counts as possibly holding workloads.
-4. **Exclusive ownership.** A rollout is driven by one NIC process at a time, holding a Kubernetes `Lease` for its whole duration. OpenTofu's per-apply locks do not cover a multi-step rollout. A NIC run that finds a live lease refuses; an expired lease is taken over only after reconciling.
-5. **Capacity before evacuation.** Before retiring the old generation, the new one is scaled until it has at least as many nodes in each availability zone as the old one, every one of them passing the consumer's checks. After each old node drains, NIC checks that no pod of the pool is left Pending and that evicted workloads' controllers have Ready replicas again, and stops if not. A consumer declares the pods that end rather than move (ADR-0023: JupyterHub user servers) and what success means for them.
-6. **Retirement.** The old generation is closed (retiring taint, fixed size so the autoscaler cannot scale it), drained node by node within disruption budgets, and deleted only after NIC re-lists its actual members from the provider and Kubernetes and finds no workload pods.
-7. **Failure.** NIC stops and keeps both generations. There is no automatic rollback once promotion has started. A generation that never reached `promoting` holds no workloads and is discarded when the config moves on. A pool has at most two generations: a new one is refused while a promoted rollout is unfinished.
-8. **Operator control in the first delivery.** `nic deploy` creates and verifies a new generation automatically. Promotion and retirement each need an explicit operator command (`nic rollout promote <pool>` and `nic rollout retire <pool>`), and `nic rollout status` and `nic outputs` report every unfinished rollout. Automating them can follow once the checks have been qualified.
+4. **One mutation lock per cluster.** Every command that changes the cluster (`nic deploy`, `nic rollout`, `nic destroy`) holds one cluster-wide lock from reading the rollout record to the end of its last apply. Per-pool locks are not enough: on AWS every node group shares one OpenTofu state and one apply, so a process holding pool A's lock could apply a stale snapshot that drops pool B's new group. The lock lives beside the provider's state where there is one (the state bucket on AWS), and as a Kubernetes `Lease` otherwise. Applies use saved plans, so OpenTofu rejects a plan whose state changed after it was made.
+5. **No automatic takeover.** An expired lock does not prove its previous holder stopped: Kubernetes leader election, for example, offers no fencing. A NIC process that cannot renew its lock starts no new step, lets provider operations already in flight finish, writes nothing more and exits with an error. A NIC run that finds an unreleased lock refuses and names the holder; the operator confirms the holder has stopped and runs `nic unlock`. Writes to the rollout record are compare-and-swap and carry the holder's identity, so a stale holder's record writes fail. Direct provider API calls are not fenced.
+6. **Same shape, then capacity before evacuation.** In the first delivery a new generation keeps the old one's instance type, architecture and availability zones; only what nodes boot with may change (node image, boot inputs, the consumer's runtime). `nic validate` rejects a shape change in an immutable pool, which instead needs a new pool that the operator migrates to. With the shape fixed, the new generation is scaled until it has at least as many nodes in each availability zone as the old one, every one passing the consumer's checks, and this is checked again at retirement, which may come days after promotion. After each old node drains, NIC checks that no pod of the pool is left Pending and that evicted workloads' controllers have Ready replicas again, and stops if not.
+7. **Declared exceptions.** A consumer declares the pods that end rather than move (ADR-0023: JupyterHub user servers). NIC's checks qualify the infrastructure only; whether those pods' owners can recreate them on the new generation is the consumer's acceptance test, which operators run before retiring.
+8. **Retirement.** The old generation is closed (retiring taint, fixed size so the autoscaler cannot scale it), drained node by node within disruption budgets, and deleted only after NIC re-lists its actual members from the provider and Kubernetes and finds no workload pods.
+9. **Failure.** NIC stops and keeps both generations. There is no automatic rollback once promotion has started. A generation that never reached `promoting` holds no workloads and is discarded when the config moves on. A pool has at most two generations: a new one is refused while a promoted rollout is unfinished.
+10. **Operator control in the first delivery.** `nic deploy` creates and verifies a new generation automatically. Promotion and retirement each need an explicit operator command (`nic rollout promote <pool>` and `nic rollout retire <pool>`), `nic rollout status` and `nic outputs` report every unfinished rollout, and `nic unlock` releases a lock whose holder the operator has confirmed stopped. Automating them can follow once the checks have been qualified.
 
 **Prerequisites.**
 
-- **AWS.** Per-group boot inputs in NIC's EKS module, including the trust bundle; groups named by generation; tfvars rendered from stored specs, with both generations kept until retirement; managed node group taint changes applied without replacing nodes; and an autoscaler that cannot scale a fixed-size group.
+- **AWS.** Per-group boot inputs in NIC's EKS module, including the trust bundle; groups named by generation; tfvars rendered from stored specs, with both generations kept until retirement; saved-plan applies and a lock in the state bucket; managed node group taint changes applied without replacing nodes; and an autoscaler that cannot scale a fixed-size group.
 - **Hetzner.** Adding and retiring individual pools (NIC wraps only cluster-wide `hetzner-k3s create` and `delete` today), with the autoscaler's per-pool configuration updated; pool-level taints that reach both existing and new nodes; and keeping hetzner-k3s's in-place k3s upgrades off immutable pools, whose k3s version becomes part of their spec.
 
 ### Consequences
@@ -68,13 +70,15 @@ A pool is **immutable** when a consumer ADR requires it; ADR-0023's opted-in poo
 - An interruption at any point leaves both generations, never lost capacity or data.
 - A small, explicit state model that NIC can resume without a controller running in the cluster.
 - Usable beyond ADR-0023, for GPU pools and node-image changes.
+- The cluster-wide lock and saved plans also close an existing race between concurrent `nic deploy` runs.
 
 **Bad:**
 - A rollout runs a full second copy of the pool until the old one is retired.
 - Workloads on the pool are disrupted; controller-less sessions end.
-- New state for NIC to own: stored specs, the rollout record and the lease.
+- New state for NIC to own: stored specs, the rollout record and the cluster-wide lock.
 - Implementation work in NIC, its EKS module and the Hetzner provider, and operator steps (promote, retire) in the first delivery.
-- Immutable pools no longer take shared-input changes (such as a new trust bundle) without a rollout.
+- Immutable pools no longer take shared-input changes (such as a new trust bundle) without a rollout, and cannot change instance type, architecture or zones in a rollout in the first delivery.
+- One lock serialises every change to a cluster, and a crashed holder needs an operator to run `nic unlock`.
 
 ## Options Detail
 
@@ -87,6 +91,8 @@ A pool is **immutable** when a consumer ADR requires it; ADR-0023's opted-in poo
 ## Open Questions
 
 - Should promotion and retirement become automatic once the capacity checks are qualified?
+- Should a fit check (pods' requests against the new generation's allocatable resources, placement rules and volume zones) allow shape changes in a rollout?
+- Can fencing extend to direct provider API calls, so that an expired lock can be taken over automatically?
 - Should operators be able to mark any pool immutable (for example GPU pools), not only through a consumer ADR?
 - Where should stored specs live: a ConfigMap, a Secret (the trust bundle may be sensitive in some deployments) or the provider's state backend?
 - Can very large pools stage a new generation in parts rather than at full size?
@@ -99,4 +105,5 @@ A pool is **immutable** when a consumer ADR requires it; ADR-0023's opted-in poo
 - [Design doc: Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md)
 - [Amazon EKS: updating a managed node group's configuration](https://docs.aws.amazon.com/eks/latest/userguide/update-managed-node-group.html)
 - [Kubernetes Leases](https://kubernetes.io/docs/concepts/architecture/leases/)
+- [OpenTofu: applying a saved plan](https://opentofu.org/docs/cli/commands/apply/)
 - [hetzner-k3s](https://github.com/vitobotta/hetzner-k3s)
