@@ -40,27 +40,34 @@ A stored spec holds everything NIC renders a group from: instance type, node ima
 
 ## 21.3 Provider primitives
 
+Observations are from the probe run of 2026-10-27 (design doc §20, "EKS: node check, failures, storage, memory and arm64" and "Hetzner: pool lifecycle, failures, storage and memory").
+
 **AWS (managed node groups, NIC's EKS module).**
 
 - Per-group boot inputs: the module passes one `extra_ca_bundle` to every group (v0.7.0 to v0.9.0); it needs a per-group input so a stored spec can keep its own.
-- Group names by generation, two groups per pool during a rollout, both rendered from stored specs.
-- Taints: managed node group taints are updated through `UpdateNodegroupConfig`; whether a change through the module's `taint` blocks applies to existing nodes without replacing them is to be qualified.
-- Fixed size: `current`'s minimum, maximum and desired size set equal, so the cluster autoscaler (auto-discovery with `balance-similar-node-groups`, `pkg/providers/cluster/aws/cluster_autoscaler.go`) cannot scale it; the Auto Scaling group may still replace a failed instance, which registers with the retiring taint. Lowering the desired size is avoided until every node is drained, because the Auto Scaling group chooses which instance to terminate.
+- Group names by generation, two groups per pool during a rollout, both rendered from stored specs. Custom per-group launch templates must keep NIC's node and VPC-endpoint security groups; without them `nodeadm` could not reach the EC2 API and nodes never joined.
+- Taints: a taint added through the module's `taint` blocks was an in-place change ("1 to change") that reached the existing node without replacing it, and `update-nodegroup-config` added and removed taints on existing nodes within 60 s. The staging and retiring barriers are therefore group-level changes on AWS.
+- Fixed size: `current`'s minimum, maximum and desired size set equal; the cluster autoscaler (auto-discovery with `balance-similar-node-groups`, `pkg/providers/cluster/aws/cluster_autoscaler.go`) did not scale a 1/1/1 group with pods pending ("max size reached"), and the Auto Scaling group's replacement for a terminated instance registered with the group's retiring taint. Lowering the desired size is avoided until every node is drained, because the Auto Scaling group chooses which instance to terminate.
 - Node image: the image release (`ami_release_version`, module v0.9.0) is pinned in the stored spec, so an image update is a new generation.
 
-**Hetzner (hetzner-k3s).**
+**Hetzner (hetzner-k3s v2.4.6).**
 
-- Pools named `<pool>-<generation>` in NIC's generated configuration; adding one by re-running `hetzner-k3s create` must leave other pools untouched and update the autoscaler's per-pool configuration (to qualify).
-- Retiring a pool: if removing it from the configuration does not delete its servers, NIC deletes the drained nodes through Kubernetes and their servers through the Hetzner API.
-- Taints: hetzner-k3s passes pool taints to k3s at registration; whether a change reaches existing nodes, and how k3s treats it at agent restart, is to be qualified. If it does not, the staging and retiring barriers need another mechanism on Hetzner before it is supported.
-- k3s upgrades: hetzner-k3s upgrades k3s in place through the system-upgrade-controller on every node. Immutable pools carry their k3s version in their spec and must be excluded (to qualify whether the upgrade plan's node selection allows it).
+- Autoscaled pools only: `create` reinstalls the cluster-wide `k3s_version` on every static node, including pools excluded from upgrades, so a static pool cannot be immutable. Autoscaled nodes are created from the pool's cloud-init and are not reinstalled; `min_nodes` keeps a floor.
+- Adding a pool: NIC adds `<pool>-<generation>` to its generated configuration and re-runs `create`, which updated the autoscaler's arguments; the install script re-runs on every static node but restarts k3s only where its flags changed.
+- Retiring a pool: removing it from the configuration leaves its servers and nodes, so NIC drains each node, deletes it through Kubernetes and deletes its server through the Hetzner API (observed working).
+- Taints: k3s applies `--node-taint` only at registration, so a configuration change reaches new nodes only; taints added or removed through the API on existing nodes survived agent restarts. NIC therefore changes both: the configuration first, so later nodes register correctly, then the existing nodes through the API. The staging taint on a new pool comes from its configuration, so no node of it registers open.
+- Fixed size: rejected by hetzner-k3s (min = max), so closing `current` relies on the retiring taint; the autoscaler built its node template from a live node, so it does not scale a closed pool for pods that do not tolerate the taint.
+- k3s upgrades: the label `plan.upgrade.cattle.io/k3s-agent=disabled` excludes a pool from the system-upgrade-controller's plan; immutable pools carry it, and their k3s version is part of their spec. hetzner-k3s v2.4.6's own upgrade hangs on k3s 1.34 (its plans select `node-role.kubernetes.io/master`), a separate issue.
+- Capacity: the project's server limits (20 shared vCPUs in the probe project) must leave room for a second generation.
 
-## 21.4 To qualify before implementation
+## 21.4 Qualified on 2026-10-27
 
-1. Group-level taint changes without node replacement: EKS through NIC's module, and k3s through hetzner-k3s pools. Both barriers depend on it; this is the first probe.
-2. A fixed-size group is never scaled by the cluster autoscaler while pods are pending, and replacement instances register with the group's taints.
-3. Adding and retiring individual Hetzner pools, with the autoscaler's per-pool configuration updated.
-4. Excluding a Hetzner pool from hetzner-k3s's in-place k3s upgrade.
+1. Group-level taint changes without node replacement: **AWS yes; Hetzner new nodes only**, with the API for existing nodes (above).
+2. A fixed-size group is never scaled while pods are pending, and replacements register with the group's taints: **AWS yes; Hetzner cannot express a fixed size**, and the taint closes the pool instead; replacements registered with the configured taint.
+3. Adding and retiring individual Hetzner pools: **adding yes; retiring needs NIC to delete nodes and servers itself.**
+4. Excluding a Hetzner pool from k3s upgrades: **yes for upgrades, but `create` reinstalls static pools**, hence autoscaled pools only.
+
+Still open: the saved-plan rejection against the S3 backend (observed with a local backend), and everything in §21.5 that needs NIC's implementation.
 
 ## 21.5 Verification checklist
 
