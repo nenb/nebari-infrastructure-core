@@ -18,7 +18,7 @@ ADR-0021 lets an agent's commands restrict themselves with Landlock. ADR-0022 le
 
 - bubblewrap's qualified configurations work inside gVisor, and a fresh `/proc` and pid namespace there close ADR-0022's remaining gaps;
 - gVisor installs at boot on opted-in pools, including autoscaled nodes, upgrades in place on k3s with running pods surviving, and a failed install never runs a pod unsandboxed;
-- storage presenting real ownership works (FSx, Longhorn), while EFS access points as NIC configures them do not;
+- storage presenting real ownership works (FSx for OpenZFS), while EFS access points as NIC configures them do not;
 - common data-science tooling works; file-heavy work on network homes is 1.4–1.8× slower, with about 3% less memory headroom;
 - nodes may change their own labels but not their taints, and on k3s such a change reverts at the next agent restart.
 
@@ -92,9 +92,8 @@ Opting a node group in changes only its boot configuration. It does **not** keep
 
 **Prerequisites.**
 
-- **Supported storage.** gVisor checks file permissions itself, so volumes gVisor pods write to must present real ownership matching the pod's UID or `fsGroup`. FSx for OpenZFS and Longhorn qualify and EBS is expected to; EFS access points as NIC configures them today do not, and existing homes on them must move under NIC's storage plan ([PR #586](https://github.com/nebari-dev/nebari-infrastructure-core/pull/586)) first. This ADR provides no migration.
-- **Longhorn with `dedicated: true`.** NIC's Longhorn install must tolerate sandbox dedication taints, which today it does only when Longhorn's own storage nodes are dedicated.
-- **Hetzner.** Node-pool labels and pre-k3s boot commands in NIC's generated configuration, the NFS client on nodes (without which Longhorn shared volumes do not mount), and the NIC team's fix for the metadata service exposing the k3s join token to pods on autoscaled nodes.
+- **Supported storage.** gVisor checks file permissions itself, so volumes gVisor pods write to must present real ownership matching the pod's UID or `fsGroup`. FSx for OpenZFS qualifies and EBS is expected to, and whatever storage a provider uses for homes must present real ownership; EFS access points as NIC configures them today do not, and existing homes on them must move under NIC's storage plan ([PR #586](https://github.com/nebari-dev/nebari-infrastructure-core/pull/586)) first. This ADR provides no migration.
+- **Hetzner.** Node-pool labels and pre-k3s boot commands in NIC's generated configuration, home storage that presents real ownership, and the NIC team's fix for the metadata service exposing the k3s join token to pods on autoscaled nodes.
 
 ### Combining capabilities
 
@@ -137,7 +136,7 @@ Before a provider, architecture and node OS family are listed, and on every gVis
 **Bad:**
 - File-heavy work on network homes is slower and JupyterLab starts slower; memory headroom is about 3% lower, which the 64 MiB overhead covers; attaching a debugger to an unrelated process does not work.
 - Existing deployments on EFS access points cannot adopt it until their homes move to supported storage.
-- Isolation from foundational services needs `dedicated: true` and a Longhorn change.
+- Isolation from foundational services needs `dedicated: true`.
 - Implementation work across NIC and its EKS module, and continuing work to follow gVisor releases, publish the artifact and re-qualify on gVisor, k3s and node-image changes. AWS upgrades end sessions on replaced nodes.
 - No GPU qualification (`nvproxy`), no AKS support (it needs `vm-boundary`), and no Landlock inside gVisor.
 
@@ -161,11 +160,10 @@ Before a provider, architecture and node OS family are listed, and on every gVis
 
 ## Related issues
 
-Found while probing for this ADR and reported to the NIC team (links to be added once the issues are public); on Hetzner this ADR depends on the first and third:
+Found while probing for this ADR and reported to the NIC team (links to be added once the issues are public); on Hetzner this ADR depends on the first:
 
 - Hetzner's metadata service exposes the k3s join token to pods on autoscaled nodes.
-- Pods can reach other users' shared volumes over NFS (Longhorn share-managers; FSx for OpenZFS as configured in [#705](https://github.com/nebari-dev/nebari-infrastructure-core/pull/705)).
-- Longhorn shared volumes do not mount on NIC's Hetzner nodes, which lack the NFS client.
+- Pods can reach other users' shared volumes over NFS (FSx for OpenZFS as configured in [#705](https://github.com/nebari-dev/nebari-infrastructure-core/pull/705), and NFS-based storage generally).
 
 ## Links
 

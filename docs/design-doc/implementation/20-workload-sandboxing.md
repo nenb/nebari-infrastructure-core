@@ -291,8 +291,6 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 - `nic deploy` reports nodes whose release label differs from the pinned release. They keep serving their release until replaced; that is the trade-off for never stranding pods.
 - Adding `dedicated: true` taints the group's nodes but does not evict running pods; conversion includes a drain.
 
-**Longhorn with dedicated groups.** NIC's Longhorn install gives its manager, driver and system-managed components wildcard tolerations only when `longhorn.dedicated_nodes` is on (`pkg/storage/longhorn/install.go`). Longhorn's per-node components must run wherever pods mount Longhorn volumes, so they need tolerations for sandbox dedication taints regardless of where replicas live; that change in NIC's Longhorn install is a prerequisite for `dedicated: true` on clusters with colocated Longhorn, and dedication is qualified with real single-writer and shared PVCs, not only an `emptyDir` pod.
-
 **Smoke pod.** A pod from an image NIC publishes alongside the gVisor artifact, with `runtimeClassName: gvisor`, pinned to one node, that passes only if `uname -r` reports gVisor's kernel; for `in-pod-namespaces` within `user-space-kernel` it also runs ADR-0022's capability test. It is deleted afterwards. It is required on `existing` and kind clusters when the capability is required (otherwise the capability is reported as unverified on the operator's attestation) and optional on clusters NIC provisions.
 
 **Diagnosing a stuck gVisor pod.** A gVisor pod in `ContainerCreating` usually means a failed or partial install on its node. The operator checks the node's labels (`sandbox.nebari.dev/user-space-kernel`, `…-release`), the install marker and boot-step log on the node (`/var/lib/nic/gvisor/marker` and `/var/log/nic-gvisor-install.log` in the proposed layout), the pod's events (`failed to resolve runtime path` points at the handler), and gVisor's own logs, enabled per node through the runtime handler's options when needed. `nic outputs` lists failed and stale nodes.
@@ -303,7 +301,7 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 
 - bubblewrap's qualified configurations and a fresh `/proc` inside gVisor, canaries hidden, no network from inside the sandbox, Landlock reported absent, `RuntimeDefault` ignored;
 - Kubernetes volume updates and NetworkPolicy enforcement for gVisor pods;
-- PVC-backed homes on each supported storage backend, and `dedicated` with Longhorn using real PVCs;
+- PVC-backed homes on each supported storage backend (FSx for OpenZFS, EBS, and whatever Hetzner uses for homes), including with `dedicated: true`;
 - scale-from-zero alongside other pool labels, and a live autoscaled node under exact pool matching on Hetzner;
 - a deliberately failed install: the node relabels itself `"false"`, receives no gVisor pods, retries, and shuts down after the retry period, with the autoscaler backing off; on k3s, the label stays `"false"` across agent restarts;
 - a canary upgrade that stops on a bad release (the first in-place node on Hetzner; the temporary one-node group on AWS);
@@ -317,6 +315,8 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 ### ADR-0023: probe evidence in full
 
 #### Evidence summary
+
+Longhorn results below are kept as a record; NIC is phasing Longhorn out, so ADR-0023 does not depend on it.
 
 Probe runs (gVisor `release-20261012.0`, non-root pods with every capability dropped) on a local Ubuntu 24.04 VM, EKS 1.34 AL2023 x86 (with EFS, and with FSx for OpenZFS from [#705](https://github.com/nebari-dev/nebari-infrastructure-core/pull/705)) and Hetzner Ubuntu 24.04 x86 with k3s, using test-only installers:
 
