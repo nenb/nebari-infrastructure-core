@@ -273,7 +273,7 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 5. Register the runtime handler (nodeadm containerd configuration merge on AWS; k3s's `config-v3.toml.tmpl` with `{{ template "base" . }}` on Hetzner).
 6. Self-test: run a trivial workload through `runsc do` as root (no containerd or kubelet needed) and confirm it reports gVisor's kernel.
 7. Write a marker file recording the result and the installed release. The outcome is decided by this marker, never by shell error handling (`set -e` is ignored inside `( … ) || …`, which in the probe logged success after a failed pull).
-8. After the node registers, a post-install step reads the marker and, using the node's own credentials, sets the label `sandbox.nebari.dev/user-space-kernel-release` to the installed release on success, or sets the group label `sandbox.nebari.dev/user-space-kernel` to `"false"` on failure. On Hetzner both steps run as cluster-wide commands that act only on nodes whose name matches an opted-in pool exactly (cluster name, pool name and delimiter). On AWS the post-install step runs once, as a systemd unit after the kubelet starts. On k3s it is a systemd unit ordered after `k3s-agent` that runs at every k3s start, re-checks the installed release with `runsc do`, and re-asserts the label, because k3s re-applies its command-line labels at each start and would otherwise put a failed node back to `"true"`.
+8. After the node registers, a post-install step reads the marker and, using the node's own credentials, sets the label `sandbox.nebari.dev/user-space-kernel-release` to the installed release on success, or sets the group label `sandbox.nebari.dev/user-space-kernel` to `"false"` on failure. On Hetzner both steps run as cluster-wide commands that act only on nodes whose name matches an opted-in pool exactly (cluster name, pool name and delimiter: static nodes are named `<cluster>-pool-<pool>-worker<N>` and autoscaled ones `<cluster>-<pool>-<hex>`, so a pool `sandbox` does not match `sandboxauto`). This depends on hetzner-k3s's node-naming convention, which NIC pins with the hetzner-k3s version, because hetzner-k3s per-pool commands do not reach autoscaled nodes. On AWS the post-install step runs once, as a systemd unit after the kubelet starts. On k3s it is a systemd unit ordered after `k3s-agent` that runs at every k3s start, re-checks the installed release with `runsc do`, and re-asserts the label, because k3s re-applies its command-line labels at each start and would otherwise put a failed node back to `"true"`.
 
 **Why routing uses the plain group label.** The `RuntimeClass` selects `sandbox.nebari.dev/user-space-kernel: "true"`, set on every node of an opted-in group through the provider's normal node-group labels. Two alternatives were rejected. A selector naming the pinned release strands pods: the `RuntimeClass` admission plugin copies the selector into each pod when it is created, so a pod created before or during an upgrade keeps the old release forever. A label set only on success cannot be expressed on Hetzner: hetzner-k3s derives autoscaler template labels from pool labels and also passes pool labels to every node as `--node-label` arguments, and k3s documents that command-line `--node-label` values replace the whole list from its configuration file. The plain group label works with both providers' plumbing and is already in autoscaler templates, so scale-from-zero needs nothing extra (observed on Hetzner). Failure is expressed by the node setting that label to `"false"` after registration. A failure taint was the first design, but node-restriction admission does not let a node modify its own taints (observed on EKS, 2026-10-26: `node ... is not allowed to modify taints`), while it does let a node change its own labels outside reserved prefixes.
 
@@ -295,11 +295,45 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 
 **Diagnosing a stuck gVisor pod.** A gVisor pod in `ContainerCreating` usually means a failed or partial install on its node. The operator checks the node's labels (`sandbox.nebari.dev/user-space-kernel`, `…-release`), the install marker and boot-step log on the node (`/var/lib/nic/gvisor/marker` and `/var/log/nic-gvisor-install.log` in the proposed layout), the pod's events (`failed to resolve runtime path` points at the handler), and gVisor's own logs, enabled per node through the runtime handler's options when needed. `nic outputs` lists failed and stale nodes.
 
+**Delivery alternatives considered.** Downloading from gVisor's release bucket at each boot needs no NIC artifact, but makes every boot depend on an external site, which proxies and restricted egress break, and the release format has already changed once. A NIC-controlled copy in an S3 bucket created with the cluster works on AWS only. Custom node images with gVisor baked in remove the download at boot but need a node-image pipeline per provider. A privileged DaemonSet installer is easy to ship but is a privileged component in the cluster that restarts containerd on running nodes and races new nodes joining unless a startup taint holds them back.
+
+**Verification checklist.** Before a provider, architecture and node OS family are listed, and on every gVisor or k3s upgrade, the probe (sandbox probe brief, Part C) runs with NIC's implementation and covers:
+
+- bubblewrap's qualified configurations and a fresh `/proc` inside gVisor, canaries hidden, no network from inside the sandbox, Landlock reported absent, `RuntimeDefault` ignored;
+- Kubernetes volume updates and NetworkPolicy enforcement for gVisor pods;
+- PVC-backed homes on each supported storage backend, and `dedicated` with Longhorn using real PVCs;
+- scale-from-zero alongside other pool labels, and a live autoscaled node under exact pool matching on Hetzner;
+- a deliberately failed install: the node relabels itself `"false"`, receives no gVisor pods, retries, and shuts down after the retry period, with the autoscaler backing off; on k3s, the label stays `"false"` across agent restarts;
+- a canary upgrade that stops on a bad release;
+- an upgrade with gVisor pods created before and during it: none stranded, stale nodes reported, and on Hetzner running pods surviving the in-place upgrade;
+- pods under tight memory limits, and JupyterLab timings.
+
 **Support matrix.** `InfraSettings.Sandbox` reports qualification per provider, CPU architecture, node OS family and container runtime version (today: AWS AL2023 x86 with containerd 2.x; Hetzner Ubuntu 24.04 x86 with the k3s versions whose `config-v3.toml.tmpl` format the install targets, re-probed on each k3s upgrade), and `nic validate` rejects opted-in groups outside it.
 
 ### ADR-0023: probe evidence in full
 
-ADR-0023 summarises these results in a table; the run-by-run detail is recorded here.
+#### Evidence summary
+
+Probe runs (gVisor `release-20261012.0`, non-root pods with every capability dropped) on a local Ubuntu 24.04 VM, EKS 1.34 AL2023 x86 (with EFS, and with FSx for OpenZFS from [#705](https://github.com/nebari-dev/nebari-infrastructure-core/pull/705)) and Hetzner Ubuntu 24.04 x86 with k3s, using test-only installers:
+
+| Claim | Result |
+|---|---|
+| Bubblewrap's qualified configurations run inside gVisor and hide canaries, the agent's socket, the network and `169.254.169.254` | Holds on all three; the final configuration (with a required fresh `/proc`) ran on Hetzner, the earlier variant on the VM and EKS. Bubblewrap's own `--unshare-net` fails ([gVisor #13438](https://github.com/google/gvisor/issues/13438)), which the qualified configurations avoid |
+| A fresh `/proc` and pid namespace work inside gVisor | Holds: only the sandbox's processes are visible and the agent cannot be signalled |
+| Boot-time installation on opted-in pools, including autoscaled-from-zero nodes | Holds on Hetzner (pre-k3s command) and AWS (node bootstrap pulling from ECR) for fresh nodes; upgrading existing nodes not tested |
+| A failed install never runs a pod unsandboxed | Holds (pod stays in `ContainerCreating`); `status.runtimeHandlers` still lists `runsc`, so it cannot detect failure |
+| Storage with real ownership works | FSx for OpenZFS (via `fsGroup`) and Longhorn volumes work; EFS access points as NIC configures them fail; EBS not tested |
+| Tooling and integration | pixi, shared memory, Dask, file watching, `debugpy`, C builds, SQLite WAL, sandboxed Chromium, NetworkPolicy, volume updates and `dedicated` routing work; attaching a debugger to an unrelated process is refused |
+| Cost | Metadata-heavy work on network homes 1.4–1.8× slower; JupyterLab startup 0.8–1.6 s slower; idle overhead about 18 MiB per pod |
+| Composition | Landlock unavailable inside gVisor; pod seccomp profiles ignored without `--oci-seccomp` |
+| A node can record its install result itself (EKS spike, 2026-10-26) | With only its own credentials, a node could change its own labels, including overwriting its node-group label, and the change survived a kubelet restart; it could not modify taints (`not allowed to modify taints`), touch other nodes, or use reserved prefixes |
+| On k3s, a node's own label change is durable (Hetzner, 2026-10-27) | No: the node could set its label to `"false"`, but a k3s agent restart put it back to `"true"`, because k3s re-applies its command-line labels at every start; self-tainting was refused, as on EKS |
+| gVisor can be upgraded in place (local k3s and Hetzner, 2026-10-27) | Holds through hetzner-k3s's system-upgrade-controller: the node moved between releases in about 15 s; a pod started on the old release kept running, accepted `kubectl exec` and deleted cleanly; new pods ran on the new release; an upgrade to a missing release left the node working on its current one, while the controller kept retrying |
+| Memory under a tight limit (local k3s and Hetzner, 2026-10-27) | Under a 512 MiB limit, an allocator was killed at 480 MiB under gVisor against 496 MiB under runc (about 3% less); writing and reading back 1.5 GiB of files completed under both; both kill the whole container |
+
+Not yet tested: NIC's own implementation (including the `curl`-based image fetch on Hetzner and re-asserting the label at every k3s start), rolling upgrades on AWS, a live autoscaled node under exact pool matching, GPUs (`nvproxy`), arm64.
+
+The run-by-run detail follows.
 
 #### Local probe (2026-10-17)
 
