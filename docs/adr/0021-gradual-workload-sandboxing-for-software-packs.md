@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT). Revised 2026-10-15: narrowed to the first capability and the naming convention for later ones. Revised 2026-10-16: replaced the per-image table and node-group labels with a support policy and a kernel floor checked by `nic validate` and `nic deploy`, since nearly every node image NIC provisions on supported Kubernetes versions already qualifies. Supporting design, including future capabilities, is in the design doc [Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md). (Renumbered from 0019, which open pull requests already use.)
+Proposed (DRAFT). Revised 2026-10-15: narrowed to the first capability and the naming convention for later ones. Revised 2026-10-16: replaced the per-image table and node-group labels with a support policy and a kernel floor checked by `nic validate` and `nic deploy`, since nearly every node image NIC provisions on supported Kubernetes versions already qualifies. Revised 2026-10-27: requirements state an ordered boundary level ("at least") that NIC resolves per provider to an implementation, separate from in-pod capabilities. Supporting design, including future capabilities, is in the design doc [Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md). (Renumbered from 0019, which open pull requests already use.)
 
 ## Date
 
@@ -76,18 +76,30 @@ The contract is an interface to the **node execution environment**: NIC states, 
 
 **Support policy.** On supported Kubernetes versions, every node group NIC provisions from a provider's default node image provides `process-self-restriction` at Landlock ABI 3 or newer, and NIC targets ABI 4 where the provider's images allow it. Where a provider's defaults fall below the floor (today EKS below 1.33 and AKS below 1.35), the provider says so and NIC's checks report it.
 
-**Naming convention.** Capability names are lowercase and hyphenated. Where a capability needs placement, nodes that provide it carry the label `sandbox.nebari.dev/<capability>`, and attributes carry their own labels under the same prefix. `process-self-restriction` needs no labels, because on a cluster that meets the floor every node provides it. Names reserved for later ADRs: `in-pod-namespaces` (namespace sandboxes inside a pod, proposed in [ADR-0022](0022-in-pod-namespaces-capability.md) and designed in [§20.9](../design-doc/implementation/20-workload-sandboxing.md#209-future-work-delivery-of-in-pod-namespaces-phase-2)), `pod-user-namespaces`, `user-space-kernel` (proposed in [ADR-0023](0023-user-space-kernel-capability.md)) and `vm-boundary`; `network-policy` is a candidate owned by [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691). Each later capability must define its guarantee, qualified consumer, placement, cluster requirements, provisioning, verification and any scale limits ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#206-the-capability-contract-in-full)).
+**Naming convention.** Capability names are lowercase and hyphenated. Where a capability needs placement, nodes that provide it carry the label `sandbox.nebari.dev/<capability>`, and attributes carry their own labels under the same prefix. `process-self-restriction` needs no labels, because on a cluster that meets the floor every node provides it. Names reserved for later ADRs: `in-pod-namespaces` (namespace sandboxes inside a pod, proposed in [ADR-0022](0022-in-pod-namespaces-capability.md) and designed in [§20.9](../design-doc/implementation/20-workload-sandboxing.md#209-future-work-delivery-of-in-pod-namespaces-phase-2)) and `pod-user-namespaces`; `user-space-kernel` (proposed in [ADR-0023](0023-user-space-kernel-capability.md)) and `vm-boundary` name implementation families of the boundary levels below; `network-policy` is a candidate owned by [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691). Each later capability must define its guarantee, qualified consumer, placement, cluster requirements, provisioning, verification and any scale limits ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#206-the-capability-contract-in-full)).
+
+### Boundary levels and resolution
+
+A requirement has three independent parts, so that it says what is needed rather than which tool provides it:
+
+1. **Boundary level** between the pod and the host, ordered by what it promises: `shared-kernel` (code calls the host kernel directly; the default runtime) < `mediated-kernel` (code never makes system calls directly to the host kernel) < `hardware-virtualised` (a hardware virtualisation boundary separates code from the host). A requirement is a minimum, so a stronger level satisfies it. The order is a policy choice, not a proof: a user-space kernel and a VM defend differently, and NIC ranks the hardware boundary higher.
+2. **In-pod capabilities** a workload uses inside its pod: `process-self-restriction` (this ADR) and `in-pod-namespaces`.
+3. **Profiles** of platform guarantees around the pod, such as network isolation and the absence of credentials (a later ADR).
+
+Implementations of a level (the default runtime; a user-space kernel such as gVisor; a VM runtime such as Kata) each publish **properties** established by NIC's probes, for example whether Landlock is available inside or the pod's seccomp profile is applied. NIC **resolves** a requirement, per provider and node group, to one implementation that meets the level and provides every in-pod capability and property required, or `nic validate` fails naming the gap. The operator's config states a floor; packs declare their own minimum (by hand until [ADR-0003](0003-software-pack-codegen.md)); the stricter wins, and operator preferences (such as lowest cost) choose among qualifying implementations. `nic validate` prints the resolution and `nic outputs` shows it; later ADRs pin it so it never changes silently between deploys. Packs use level-named published settings, never an implementation's name, so a pack written against one provider runs unchanged where another implementation of the same level is resolved. Portability has a price: a pack that relies on a property not every implementation has must require it, and fewer providers then qualify. The model, properties and resolution rules are in [§20.6](../design-doc/implementation/20-workload-sandboxing.md#boundary-levels-properties-and-resolution).
 
 ### Interfaces
 
 1. **The provider's floor.** Each cluster provider reports in `InfraSettings.Sandbox` the Landlock ABI its node images provide, as a pure function of config like the rest of `InfraSettings`. For example, the AWS provider reports ABI 6 for Kubernetes 1.33 and later and ABI 2 below; Azure reports ABI 4 from 1.35 and ABI 1 below; Hetzner reports ABI 4. Where the provider cannot know (an image pinned by the operator, `existing`, kind), it reports the floor as unknown.
-2. **The requirement.** A top-level `sandbox.require` lists capabilities the operator requires, optionally with a minimum:
+2. **The requirement.** A top-level `sandbox.require` states the boundary level and the in-pod capabilities the operator requires, optionally with a minimum:
 
    ```yaml
    sandbox:
      require:
-       - capability: process-self-restriction
-         minLandlockABI: 4
+       boundary: shared-kernel          # at least this level; the default
+       capabilities:
+         - name: process-self-restriction
+           minLandlockABI: 4
    ```
 
    **`nic validate`** compares the requirement with the provider's floor, offline and before any infrastructure exists, and errors if the floor is known and too low. Without `sandbox.require` it reports nothing. The floor is transitional: once every supported Kubernetes version on every provider qualifies, this comparison can no longer fail and can be removed, leaving the deploy-time check.
@@ -114,7 +126,7 @@ The deploy-time check is an **inference, not an observation**: a kernel version 
 - A useful primitive with no relaxation of pod security, no long-running components and no admission exceptions.
 - Pack developers get a documented, provider-neutral primitive and choose their own tool, and need no node selectors to use it.
 - NIC's code is small: a field in `InfraSettings`, a config field, a version comparison in `nic validate` and a kernel check in `nic deploy`. There is no image table, no labels and nothing installed in the cluster, and `existing` and kind clusters get a check they did not have before.
-- Stronger isolation can be added later under reserved names without breaking packs that rely on this capability.
+- Stronger isolation can be added later as implementations of higher boundary levels without breaking packs that rely on this capability, and requirements stay portable: a pack asking for at least `mediated-kernel` is satisfied by whichever implementation each provider can offer.
 
 **Bad:**
 - The capability ties the platform to node kernel versions: EKS below Kubernetes 1.33 and AKS below 1.35 do not qualify by default, and neither do node groups pinned to older images.
@@ -122,7 +134,7 @@ The deploy-time check is an **inference, not an observation**: a kernel version 
 - The checks are inferences from version numbers: they cannot see Landlock disabled at boot or kernels with backported features, and nodes added after a deploy are not checked.
 - A deploy-time failure happens after infrastructure exists; `nic validate` catches the common case first.
 - NIC maintainers keep each provider's floor current and rerun the probe when a provider changes kernel line.
-- It does not combine with every later capability: gVisor does not implement Landlock, so packs cannot use it inside a `user-space-kernel` pod ([§20.12](../design-doc/implementation/20-workload-sandboxing.md#2012-composition-and-privilege-tiers-for-later-capabilities)).
+- Whether it is available at a higher level depends on the implementation: gVisor does not implement Landlock, so a requirement for both resolves only where a VM runtime is available ([§20.12](../design-doc/implementation/20-workload-sandboxing.md#2012-composition-and-privilege-tiers-for-later-capabilities)).
 - The contract's shape is fixed before a second capability exists, so later capabilities must fit it or amend it.
 - Pack integration is manual until ADR-0003 exists.
 
@@ -145,19 +157,19 @@ The deploy-time check is an **inference, not an observation**: a kernel version 
 
 ### Option 4: Stronger-isolation runtime only (gVisor or Kata)
 
-A much stronger boundary, but it needs provider-specific runtime installation (nested virtualisation or bare metal for Kata), adds overhead and compatibility gaps, and changes the pod model rather than letting packs confine tools inside an existing pod. Kept as the future `user-space-kernel` and `vm-boundary` capabilities.
+A much stronger boundary, but it needs provider-specific runtime installation (nested virtualisation or bare metal for Kata) and adds overhead and compatibility gaps. Kept as implementations of the `mediated-kernel` and `hardware-virtualised` levels.
 
 ### Option 5: Adopt a full sandbox platform (e.g. Agent Substrate)
 
-A stronger boundary with egress, credential injection and suspend/resume built in, but it replaces the pod model, cannot run on NIC's providers today, needs relaxed privileges for its worker pods, and has a large footprint for a pre-1.0 project. Such a platform is a candidate provider for later capabilities, not a replacement for the contract.
+A stronger boundary with egress, credential injection and suspend/resume built in. Agent Substrate (v0.6.0, October 2026; pre-1.0, documented for GKE and kind only) runs many actors inside each worker pod, each under gVisor or a Kata guest on Cloud Hypervisor that the worker starts itself rather than through a `RuntimeClass`. Its worker pods are not `privileged` but run as root with added capabilities and seccomp and AppArmor unconfined; it needs Kubernetes pod-certificate APIs (beta in 1.36, realistically 1.37) and enforced NetworkPolicy, and has a large footprint. It cannot run on NIC's providers today and is not a replacement for the contract. Where it can run, it would be admitted as a separate platform on dedicated node groups, claiming a boundary level that NIC records as claimed, not verified.
 
 ### Option 6: Node Feature Discovery
 
-Node Feature Discovery, a Kubernetes SIG project, runs a DaemonSet that reads each node's kernel version and configuration, and a controller that turns those facts into node labels through `NodeFeatureRule` resources. It would label nodes automatically, including images NIC does not know, `existing` clusters and kind. It was discarded because it adds a DaemonSet, a controller with permission to patch nodes, and CRDs to the cluster for something NIC can do with a version comparison: the node images NIC provisions are known in advance and change rarely. Like the kernel check, it reads kernel configuration rather than confirming Landlock is active at boot. It remains an option if clusters NIC does not provision become important.
+Node Feature Discovery, a Kubernetes SIG project, labels nodes from their kernel version and configuration through a DaemonSet, a controller and CRDs, including on images NIC does not know, `existing` clusters and kind. Discarded because it adds in-cluster components for what a version comparison does for the images NIC provisions, and like the kernel check it reads configuration rather than confirming Landlock is active. It remains an option if clusters NIC does not provision become important.
 
 ### Option 7: Node-group labels from an image table
 
-An earlier draft of this ADR had NIC keep a table of the node images it provisions and the Landlock ABI each provides, predict the capability when it creates each node group, and set `sandbox.nebari.dev/process-self-restriction` and `sandbox.nebari.dev/landlock-abi` as node-group labels, so packs could select qualifying nodes and a read-only readiness record could report nodes that drifted from the prediction. It was discarded because nearly every image NIC provisions on supported versions already qualifies, so the labels would only help clusters that mix qualifying and non-qualifying node groups, at the cost of a table to keep current, label support in every provider (Hetzner node pools lack it today) and a readiness record. If mixed clusters become common, it can be added later without changing the capability's name or guarantee. The design is kept in [§20.16](../design-doc/implementation/20-workload-sandboxing.md#option-7-node-group-labels-from-an-image-table).
+An earlier draft labelled qualifying node groups from a NIC-maintained table of node images and their Landlock ABIs. Discarded because nearly every image NIC provisions already qualifies, so the labels would help only clusters that mix qualifying and non-qualifying groups, at the cost of a table, label support in every provider and a readiness record; it can be added later without changing the capability. The design is kept in [§20.16](../design-doc/implementation/20-workload-sandboxing.md#option-7-node-group-labels-from-an-image-table).
 
 The full assessment of Options 4 and 5 is in [§20.16](../design-doc/implementation/20-workload-sandboxing.md#2016-alternatives-considered-in-detail).
 
@@ -165,7 +177,7 @@ The full assessment of Options 4 and 5 is in [§20.16](../design-doc/implementat
 
 - Should NIC's AKS module expose an `os_sku` (node OS image) setting, so Azure clusters below Kubernetes 1.35 can use Ubuntu 24.04 and qualify? (§20.4.)
 - Should the Pack Specification's security baseline add a sandboxing section that points at this contract, and say anything about `seccompProfile` for pods that do not sandbox?
-- Should Nebari offer a uniform API for packs to **request** sandboxes, independent of the provider underneath? The request mechanism differs by provider (`runtimeClassName` for a `RuntimeClass`, a platform's own API or SDK); a standard request layer, such as the Agent Sandbox project's `Sandbox`/`SandboxClaim` resources, would be a separate decision.
+- Should Nebari also offer a request layer for sandboxes on top of the level-named published settings, such as the Agent Sandbox project's `Sandbox`/`SandboxClaim` resources? That would be a separate decision.
 - Is it worth **automating the probe**: packaging it as a container image that `nic deploy` runs as short-lived pods on each node group, to observe the capability directly (Landlock enabled at boot and its real ABI, filesystem and TCP rules taking effect, nested seccomp user notification working under the default seccomp profile)? It would catch what version numbers miss, including on `existing` clusters, at the cost of building, publishing, pinning and maintaining a multi-architecture image and the code that runs it. How often the maintainers' probe runs disagree with the version check should decide it.
 - Should capability names themselves be versioned, so a guarantee can be tightened without silently changing its meaning?
 
