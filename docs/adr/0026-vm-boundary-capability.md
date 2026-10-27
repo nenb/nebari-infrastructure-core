@@ -113,6 +113,7 @@ Resolution uses the properties above: `process-self-restriction` is available at
 - Slower pod start than gVisor (about 1.5 s), about 255–285 MiB of host memory per VM, and less usable memory in the guest than the pod's limit.
 - On AWS, Intel 7th- and 8th-generation families only; bare metal costs more and scales coarsely.
 - NIC owns another runtime artifact and its re-qualification on Kata, VMM, kernel and node-image changes.
+- The guest kernel is a second kernel, besides the host's, that NIC must track and patch.
 
 ## Options Detail
 
@@ -125,7 +126,7 @@ Resolution uses the properties above: `process-self-restriction` is available at
 ## Open Questions
 
 - How does Kata on nested virtualisation perform against bare metal, and in which other regions are the families available?
-- Which VMM should the AWS artifact use (QEMU, Cloud Hypervisor)?
+- The artifact uses QEMU, the VMM tested. Should a smaller VMM (Firecracker or Cloud Hypervisor) replace it later? That would change how volumes reach the guest.
 - What `RuntimeClass` overhead and limit sizing should be published, given that the guest sees less memory than the limit (the chart's default overhead is 320 MiB)?
 - Should `vm-boundary` be required to use ADR-0025's profile, given its primary consumer?
 - Should Hetzner dedicated servers, which expose virtualisation, be supported?
