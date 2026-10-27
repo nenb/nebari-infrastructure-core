@@ -14,7 +14,7 @@ ADR-0021 lets an agent's commands restrict themselves with Landlock. ADR-0022 le
 
 [gVisor](https://gvisor.dev/) runs a pod behind its own user-space kernel, which reaches the host kernel through a small, filtered set of its own calls. That gives a **stronger boundary between the pod and the host**, maintained by the gVisor project rather than NIC, and **namespaces without host relaxation**, since gVisor implements them itself. gVisor alone protects the host from the pod, not the pod's credentials from the agent's commands, which is ADR-0021's threat model; bubblewrap inside a gVisor pod covers both.
 
-**Evidence.** Probe runs on a local VM, EKS (AL2023 x86, with EFS and with FSx for OpenZFS) and Hetzner (Ubuntu 24.04 x86, k3s), using test-only installers, found that:
+**Evidence.** Probe runs on a local VM, EKS (AL2023 x86 and arm64, with EFS, EBS and FSx for OpenZFS) and Hetzner (Ubuntu 24.04 x86, k3s), using test-only installers, found that:
 
 - bubblewrap's qualified configurations work inside gVisor, and a fresh `/proc` and pid namespace there close ADR-0022's remaining gaps;
 - gVisor installs at boot on opted-in pools, including autoscaled nodes, and a failed install never runs a pod unsandboxed;
@@ -84,7 +84,7 @@ Opting in changes only the group's boot configuration. It does **not** keep foun
 
 1. **`nic validate`** checks the requirement against a support matrix each provider reports in `InfraSettings.Sandbox`: CPU architecture, node OS family and the **resolved** toolchain (container runtime; on Hetzner, the hetzner-k3s binary actually in use, including one from `NIC_HETZNER_K3S_PATH` or `PATH`, and the exact k3s release). When the capability is required, an unqualified or unverifiable toolchain, Azure, no opted-in group, or Hetzner before its prerequisites are in NIC is an error. On `existing` clusters, and kind clusters where the operator installed gVisor, NIC runs in **verification-only mode**: the operator names the `RuntimeClass`, NIC skips the provisioning checks and only runs the deploy check (step 5), and never creates, changes or deletes the `RuntimeClass`.
 2. **Installation at node boot, on opted-in groups only.** A boot step fetches NIC's published image of the pinned gVisor release, verifies the manifest against a pinned digest and each file against a list, and installs it once, into a directory the runtime handler names. A node's release never changes after it joins. A failed install never stops a node joining.
-3. **Node check and routing.** NIC creates a `RuntimeClass` named `gvisor` (handler `runsc`, a fixed `overhead`) whose `scheduling` selects the group label `sandbox.nebari.dev/user-space-kernel: "true"` (and tolerates the taint with `dedicated: true`); it never names a release, because Kubernetes copies the selector into pods and a release would strand them. Each node then runs a test pod sandbox through the CRI with the `runsc` handler pods use (not `ctr`, which bypasses the handler's configuration) and the published security settings, checking gVisor's kernel and ADR-0022's capability test, and labels itself: a release label on success; on failure the group label `"false"` and an event. On k3s, which resets command-line labels at each start, this repeats at every start. Pods that reach a node before it relabels fail to start; they never run unsandboxed.
+3. **Node check and routing.** NIC creates a `RuntimeClass` named `gvisor` (handler `runsc`, a fixed memory `overhead` of 64 MiB, which in the probes more than covered gVisor's lower headroom under a limit) whose `scheduling` selects the group label `sandbox.nebari.dev/user-space-kernel: "true"` (and tolerates the taint with `dedicated: true`); it never names a release, because Kubernetes copies the selector into pods and a release would strand them. Each node then runs a test pod sandbox through the CRI with the `runsc` handler pods use (not `ctr`, which bypasses the handler's configuration) and the published security settings, checking gVisor's kernel and ADR-0022's capability test, and labels itself: a release label on success; on failure the group label `"false"` and an event. On k3s, which resets command-line labels at each start, this repeats at every start. Pods that reach a node before it relabels fail to start; they never run unsandboxed. On EKS a failed node relabelled itself before it was Ready; on k3s the pod that triggered an autoscaled node was bound within its first seconds and stayed stuck.
 4. **Failed nodes stay in service** for their other workloads; NIC does not retire them, since the autoscaler counts any Ready node as a successful scale-up. A persistent failure can therefore grow a group to its maximum, which operators keep modest.
 5. **`nic deploy` check, mandatory.** A smoke pod runs on each node of each opted-in group with the published settings and must pass the same checks; any failure fails the deploy, and groups at zero nodes are reported as unverified. In verification-only mode it runs on each node the named `RuntimeClass` can schedule to. `status.runtimeHandlers` is not evidence: it lists `runsc` after a failed install.
 6. **Published pod settings:** `runtimeClassName: gvisor` (in verification-only mode, the name the operator chose) and `seccompProfile: RuntimeDefault`. gVisor does not apply the pod's profile, so the pod passes Pod Security `restricted` without blocking bubblewrap. ADR-0022's "leave `seccompProfile` unset" applies only to bubblewrap on the host.
@@ -93,9 +93,9 @@ Opting in changes only the group's boot configuration. It does **not** keep foun
 
 **Prerequisites.**
 
-- **Supported storage.** gVisor checks file permissions itself, so volumes its pods write to must present real ownership matching the pod's UID or `fsGroup`. FSx for OpenZFS qualifies and EBS is expected to; EFS access points as NIC configures them do not, and homes on them must move under NIC's storage plan ([PR #586](https://github.com/nebari-dev/nebari-infrastructure-core/pull/586)) first. This ADR provides no migration. Retiring a group must not lose data, so opted-in groups need storage that keeps no data on the nodes: delivery depends on NIC's replacement for node-local block storage, and `nic validate` rejects opted-in groups until then.
+- **Supported storage.** gVisor checks file permissions itself, so volumes its pods write to must present real ownership matching the pod's UID or `fsGroup`. FSx for OpenZFS and EBS (gp3) on AWS, and Hetzner Cloud Volumes, qualify; EFS access points as NIC configures them do not, and homes on them must move under NIC's storage plan ([PR #586](https://github.com/nebari-dev/nebari-infrastructure-core/pull/586)) first. This ADR provides no migration. Retiring a group must not lose data, so opted-in groups need storage that keeps no data on the nodes: delivery depends on NIC's replacement for node-local block storage, and `nic validate` rejects opted-in groups until then.
 - **AWS.** Per-node-group bootstrap in NIC's EKS module, and ADR-0024's AWS prerequisites.
-- **Hetzner.** Node-pool labels and pre-k3s boot commands in NIC's generated configuration, ADR-0024's Hetzner prerequisites (including a lifecycle for individual pools), home storage with real ownership, and the NIC team's fix for the metadata service exposing the k3s join token to pods.
+- **Hetzner.** Node-pool labels and pre-k3s boot commands in NIC's generated configuration, ADR-0024's Hetzner prerequisites (including a lifecycle for individual pools, and gVisor on autoscaled pools only, since `hetzner-k3s create` reinstalls k3s on static nodes), homes on Hetzner Cloud Volumes, and the NIC team's fix for the metadata service exposing the k3s join token to pods.
 
 ### Combining capabilities
 
@@ -137,7 +137,7 @@ Before a provider, architecture, OS family and toolchain are listed, and on ever
 **Bad:**
 - Rollouts restart users' sessions and disrupt other workloads on shared groups, and need a second group's capacity while they run (ADR-0024).
 - Failed nodes waste capacity until an operator replaces them, and repeated failures can grow a group to its maximum.
-- File-heavy work on network homes and JupyterLab startup are slower, file watchers miss changes from other pods unless they poll, debugging unrelated processes does not work, and memory headroom under a limit is slightly lower (about 16 MiB at 512 MiB).
+- File-heavy work on network homes and JupyterLab startup are slower, file watchers miss changes from other pods unless they poll, debugging unrelated processes does not work, and memory headroom under a limit is slightly lower (32–48 MiB at 1 GiB under JupyterLab), which the `RuntimeClass` overhead compensates; at the limit the whole pod is killed, server included, as under runc.
 - Deployments with homes on EFS access points cannot adopt it until the homes move; isolation from foundational services needs `dedicated: true`.
 - Implementation work across NIC and its EKS module, plus ADR-0024, and continuing work to follow gVisor releases and re-qualify on gVisor, k3s and node-image changes.
 - No GPU qualification (`nvproxy`), no AKS support (it needs `vm-boundary`), and no Landlock inside gVisor.
@@ -157,9 +157,8 @@ Before a provider, architecture, OS family and toolchain are listed, and on ever
 - Where does NIC publish the gVisor image, and how do operators with private registries mirror it?
 - Should failed nodes be replaced automatically, and scale-up stop for a failing group? Both need a component in the cluster.
 - Should sessions survive upgrades in a later delivery?
-- Should a startup taint close the window before a node records its result?
-- How does the `RuntimeClass` overhead interact with container memory limits under gVisor, and what value should it be?
-- Should GPU (`nvproxy`) and arm64 node groups be qualified?
+- Should a startup taint close the window before a node records its result? Nodes cannot remove their own taints, so it needs a remover in the cluster; on k3s the window leaves the pod that triggered a scale-up stuck.
+- Should GPU (`nvproxy`) node groups, and arm64 on Hetzner, be qualified?
 - Does this capability make ADR-0022's first implementation unnecessary on AWS?
 
 ## Related issues
@@ -167,6 +166,7 @@ Before a provider, architecture, OS family and toolchain are listed, and on ever
 Found while probing for this ADR and reported to the NIC team (links to be added once the issues are public); on Hetzner this ADR depends on the first:
 
 - Hetzner's metadata service exposes the k3s join token to pods on autoscaled nodes.
+- hetzner-k3s v2.4.6's k3s upgrade hangs on k3s 1.34: its upgrade plans select `node-role.kubernetes.io/master`, which k3s 1.34 no longer sets.
 - Pods can reach other users' shared volumes over NFS (FSx for OpenZFS as configured in [#705](https://github.com/nebari-dev/nebari-infrastructure-core/pull/705), and NFS-based storage generally).
 
 ## Links
