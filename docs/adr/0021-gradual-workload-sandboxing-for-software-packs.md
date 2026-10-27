@@ -80,7 +80,7 @@ Chosen option: "Option 3". This ADR is a deliberately small first step: it deliv
 
 A requirement has three independent parts, so it says what is needed rather than which tool provides it:
 
-1. **Boundary level** between the pod and the host, ordered by what it promises: `shared-kernel` (code calls the host kernel directly; the default runtime) < `mediated-kernel` (code never makes system calls directly to the host kernel) < `hardware-virtualised` (a hardware virtualisation boundary separates code from the host). A requirement is a minimum, so a stronger level satisfies it. The order is a policy choice, not a proof (§20.6).
+1. **Boundary level** between the pod and the host, ordered by what it promises: `shared-kernel` (code calls the host kernel directly; the default runtime) < `mediated-kernel` (code never makes system calls directly to the host kernel) < `hardware-virtualised` (a hardware virtualisation boundary separates code from the host). A requirement is a minimum, so a stronger level satisfies it. Levels compare interfaces (what the code talks to), not a strict security ranking: a user-space kernel and a VM protect in different ways, so the order is a policy choice for "at least", not a proof (§20.6).
 2. **In-pod capabilities** a workload uses inside its pod: `process-self-restriction` (this ADR) and `in-pod-namespaces`.
 3. **Profiles** of platform guarantees around the pod, such as network isolation and the absence of credentials (a later ADR).
 
@@ -197,3 +197,4 @@ Questions specific to later capabilities are in [§20.14](../design-doc/implemen
 - [Landlock](https://docs.kernel.org/security/landlock.html)
 - [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards)
 - [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/)
+- [Luis Cardoso, "Sandboxes for AI" (2026)](https://www.luiscardoso.dev/blog/sandboxes-for-ai)
