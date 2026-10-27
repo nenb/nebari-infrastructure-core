@@ -83,15 +83,15 @@ Layer 2 is the same on every provider, so most of the work is provider-neutral; 
 
 In short, the contract is an interface to the **node execution environment**: NIC promises, by name and with verification, what the nodes' kernel, kubelet configuration, container runtime and security profiles will let a pod do. Packs still write their own pod settings and run their own sandboxing tools; networking (NetworkPolicy enforcement) and higher-level sandbox systems that build on these capabilities are outside it.
 
-The cluster advertises a **set of capabilities**, not a single level, because the options are not strictly ordered (a VM runtime is not a superset of in-pod namespaces). Capabilities name **guarantees, not mechanisms**.
+A requirement has three independent parts: an ordered **boundary level** between pod and host, a set of **in-pod capabilities** the workload uses inside its pod, and **profiles** of platform guarantees around the pod. In-pod capabilities are not ordered against levels (a VM is not a superset of in-pod namespaces), which is why they are a separate axis. All of them name **guarantees, not mechanisms**; how levels, implementations and properties fit together is in "Boundary levels, properties and resolution" below.
 
 | Capability | Guarantee | Qualified consumer | Phase |
 |---|---|---|---|
 | `process-self-restriction` | A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict itself and its descendants with Landlock (ABI 3 or newer; the observed ABI is reported) and with nested seccomp filters, including user-notification filters. User notification is a mechanism for emulating syscalls or injecting descriptors, not a security-policy check on its own: a supervisor that inspects a syscall's arguments and then lets it continue can race with changes to that memory or filesystem state, as the Linux manual warns. | A Landlock ruleset that denies a filesystem write and, at ABI 4, restricts `connect` to one port; a nested seccomp user-notification filter | **1 (this ADR)** |
 | `in-pod-namespaces` | A non-root process with no added capabilities can create a user namespace that maps **only its own UID and GID**, and mount, network, IPC and UTS namespaces inside it. The container's masked `/proc` is retained (bind-mounted, not freshly mounted), so no pid namespace with a fresh procfs is guaranteed. | One pinned bubblewrap version with a fixed, tested invocation (§20.9) | **2 (this ADR, gated)** |
 | `pod-user-namespaces` | Pods may set `hostUsers: false`. Permission to unmask `/proc` is a separate question: Pod Security `restricted` rejects `procMount: Unmasked` even with `hostUsers: false` as of Kubernetes 1.36. | n/a | Later ADR |
-| `user-space-kernel` | Workloads that request it run behind a user-space kernel that implements the Linux syscall interface. | n/a | Later ADR |
-| `vm-boundary` | Workloads that request it run behind a hardware-virtualisation boundary with their own guest kernel. | n/a | Later ADR |
+| `user-space-kernel` | Implementation family of the `mediated-kernel` level: workloads run behind a user-space kernel that implements the Linux syscall interface. | n/a | Later ADR |
+| `vm-boundary` | Implementation family of the `hardware-virtualised` level (which also satisfies `mediated-kernel`): workloads run behind a hardware-virtualisation boundary with their own guest kernel. | n/a | Later ADR |
 | `network-policy` | NetworkPolicies are enforced for ingress and egress. | n/a | Candidate only; owned by [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) |
 
 Tools that need more than the qualified configuration are **potential** consumers, not implied ones. Rootless container engines are the main example: normal multi-UID operation uses `newuidmap`/`newgidmap` and subordinate ID ranges, which a non-root pod with `allowPrivilegeEscalation: false` and no capabilities cannot use, and they may also need FUSE, storage drivers or cgroup delegation. Supporting them would be a separately qualified configuration.
@@ -99,6 +99,38 @@ Tools that need more than the qualified configuration are **potential** consumer
 Every capability is defined by the same items: **guarantee**, **qualified consumer**, **placement**, **cluster requirements** (node kernel or OS, boot-time node settings, Kubernetes or API-server features, all expressed through provider config), **provisioning** (what is installed, by whom, and when in the lifecycle), **verification**, and any **scale limits**. Later ADRs may add capabilities by defining these items. For capabilities backed by a `RuntimeClass`, placement uses the `RuntimeClass`'s own `scheduling` field (node selector and tolerations merged into pods by Kubernetes), so packs only set `runtimeClassName`; NIC does not duplicate that mechanism.
 
 Composition rules and the privilege tiers available to later capabilities are in §20.12.
+
+### Boundary levels, properties and resolution
+
+**Levels.** Each level is defined by its promise, so it can be checked on a running pod:
+
+| Level | Promise | Checked by the deploy-time smoke pod | Implementations |
+|---|---|---|---|
+| `shared-kernel` | Code runs on the host kernel; only in-pod capabilities fence it | Nothing beyond the in-pod capabilities required | The default runtime (runc) |
+| `mediated-kernel` | Code never makes system calls directly to the host kernel | The kernel release seen inside the pod differs from the node's (`node.status.nodeInfo.kernelVersion`), plus the implementation's own check | A user-space kernel (`user-space-kernel`: gVisor); any `hardware-virtualised` implementation |
+| `hardware-virtualised` | A hardware virtualisation boundary separates code from the host | As above, and the pod sees itself as a virtual machine guest (the CPU's hypervisor flag) | A VM runtime (`vm-boundary`: Kata) |
+
+The order is a policy choice: a user-space kernel exposes a small, filtered set of host system calls, while a VM relies on hardware and runs a full guest kernel. NIC ranks the hardware boundary higher, and says so where it publishes the order.
+
+**Properties.** Each implementation carries a list of properties, each established by the probe on each qualified provider, architecture and node OS, and re-established on runtime upgrades. Properties replace pairwise combination rules: a requirement names the in-pod capabilities and properties it depends on, and resolution looks them up. Current values (from the probes recorded with ADR-0023 and ADR-0026):
+
+| Property | Default runtime | gVisor | Kata (QEMU) |
+|---|---|---|---|
+| `process-self-restriction` (Landlock inside) | Where the node kernel meets the floor | No (`ENOSYS`) | Yes (guest ABI 7) |
+| `in-pod-namespaces` (bubblewrap's qualified configurations) | AL2023 only, with `seccompProfile` unset | Yes (network namespace created first) | Not yet probed |
+| Pod's `seccompProfile` applied | Yes | No (without `--oci-seccomp`) | No (in the tested configuration) |
+| Root inside contained from the host kernel | No | Yes | Yes |
+| Fresh `/proc` in a pid namespace | No | Yes | Not yet probed |
+| inotify events for changes made by other pods | Yes | No (polling only) | Not yet probed |
+| Usable memory under a limit | The limit | The limit plus the class overhead | Less than the limit (about 947 MiB at 1 GiB) |
+
+**Resolution.** Inputs: the operator's `sandbox.require` (the floor), each pack's declared minimum (by hand until ADR-0003), the operator's preferences (for example lowest cost, or a named implementation), and what each provider and node group can offer (`InfraSettings.Sandbox` reports, per opted-in group, the implementations available there, such as gVisor everywhere NIC supports it and Kata only on VM-capable instance types). NIC takes the stricter of floor and pack minimum, keeps the implementations that meet the level and provide every required in-pod capability and property, applies the preferences, and picks one. If none qualifies, `nic validate` fails and names the gap, for example: "mediated-kernel with process-self-restriction on hetzner: gVisor lacks Landlock; no VM-capable node groups on Hetzner Cloud". In practice NIC resolves **one implementation per level per cluster**, because a `RuntimeClass` names one handler and has one fixed overhead.
+
+**Pinning and publishing.** `nic validate` prints the resolution and `nic outputs` shows it. Node groups that run a resolved implementation record it in their stored spec (ADR-0024), so it never changes silently between deploys; a change of implementation is a rollout. NIC publishes level-named settings: a `RuntimeClass` named `nebari-mediated-kernel` or `nebari-hardware-virtualised`, pointing at the resolved implementation, and `seccompProfile: RuntimeDefault`. Packs never name `gvisor` or `kata`. Because a stronger level satisfies a weaker one, the `nebari-mediated-kernel` class may point at a VM runtime where resolution chose one.
+
+**Claimed levels.** A sandbox platform that isolates work itself rather than through NIC's runtimes (ADR-0025's platform profile) can claim a level. NIC records it as claimed and shows it that way in `nic validate` and `nic outputs`; it does not run its smoke checks against it, and an operator floor may require levels to be verified.
+
+**Limits.** Portability costs features: code written against a level may assume only properties every implementation of that level has. "At least" can cost more: satisfying `mediated-kernel` with a VM runtime may need special instance types, so preferences and `nic outputs` report what was chosen and why. Properties are qualified per release of each runtime and may change with it.
 
 ### Three separate interfaces
 
@@ -289,7 +321,7 @@ Items 1-4 below concern the future `in-pod-namespaces` capability (§20.9); `pro
 
 ## 20.12 Composition and privilege tiers for later capabilities
 
-**Composition.** In-pod namespace tools can also run *inside* a `user-space-kernel` or `vm-boundary` workload, where they may obtain namespaces through privileges the outer boundary contains (root, `CAP_SYS_ADMIN`), with no node-level change. On the default runtime the only accepted route is the unprivileged one: `CAP_SYS_ADMIN` on a default-runtime pod is never an accepted way to obtain `in-pod-namespaces`. `process-self-restriction` depends on the kernel the workload actually sees: inside a stronger runtime that is the runtime's kernel, not the node's. gVisor (`release-20261012.0`) does not implement Landlock (`landlock_create_ruleset` returns `ENOSYS`), so `process-self-restriction` does not combine with a gVisor-backed `user-space-kernel`. Conversely, under gVisor a non-root process with no capabilities can create user, mount, IPC, UTS and pid namespaces and mount a fresh procfs, with no node-level change; bubblewrap's own network-namespace setup fails there ([gVisor #13438](https://github.com/google/gvisor/issues/13438)) unless the network namespace is created first (probe, 2026-10-17). Every combination a pack relies on is probed before it is advertised; for example, NetworkPolicy enforcement is checked separately under each stronger runtime, and where a capability's workloads bypass the pod network entirely (for example VMs networked by a host-level process), NetworkPolicy does not apply and that capability's ADR must state how egress is enforced.
+**Composition.** Which in-pod capabilities are available at a level is recorded as properties of each implementation (§20.6), and resolution uses them; this paragraph records how those properties came about. In-pod namespace tools can also run *inside* a `user-space-kernel` or `vm-boundary` workload, where they may obtain namespaces through privileges the outer boundary contains (root, `CAP_SYS_ADMIN`), with no node-level change. On the default runtime the only accepted route is the unprivileged one: `CAP_SYS_ADMIN` on a default-runtime pod is never an accepted way to obtain `in-pod-namespaces`. `process-self-restriction` depends on the kernel the workload actually sees: inside a stronger runtime that is the runtime's kernel, not the node's. gVisor (`release-20261012.0`) does not implement Landlock (`landlock_create_ruleset` returns `ENOSYS`), so `process-self-restriction` does not combine with a gVisor-backed `user-space-kernel`. Conversely, under gVisor a non-root process with no capabilities can create user, mount, IPC, UTS and pid namespaces and mount a fresh procfs, with no node-level change; bubblewrap's own network-namespace setup fails there ([gVisor #13438](https://github.com/google/gvisor/issues/13438)) unless the network namespace is created first (probe, 2026-10-17). Every combination a pack relies on is probed before it is advertised; for example, NetworkPolicy enforcement is checked separately under each stronger runtime, and where a capability's workloads bypass the pod network entirely (for example VMs networked by a host-level process), NetworkPolicy does not apply and that capability's ADR must state how egress is enforced.
 
 **Privilege tiers.** Later capabilities may need more privilege than these two. Each tier is admitted in hardened mode only on the stated terms, and each later capability's ADR must justify its tier against restricted-compatible alternatives, which exist for capable sandbox systems:
 
@@ -362,22 +394,22 @@ ADR-0021 summarises Options 4, 5 and 7; their full assessment is recorded here.
 Provide only a `RuntimeClass` backed by gVisor or Kata, e.g. through `kubernetes-sigs/agent-sandbox`.
 
 - **Pros:** much stronger boundary; a kernel exploit in the workload does not directly yield the node.
-- **Cons:** provider-specific runtime installation (nested virtualisation or bare metal for Kata), memory and I/O overhead, compatibility gaps; changes the pod model rather than letting packs confine tools inside an existing pod.
+- **Cons:** provider-specific runtime installation (nested virtualisation or bare metal for Kata), memory and I/O overhead, compatibility gaps.
 
-Kept as the planned `user-space-kernel` and `vm-boundary` capabilities.
+Kept as implementations of the `mediated-kernel` and `hardware-virtualised` levels (§20.6).
 
 ### Option 5: Adopt a full sandbox platform (e.g. Agent Substrate)
 
-Install a complete agent-sandbox platform as NIC's sandboxing answer and have packs run untrusted work on it. Agent Substrate is the leading example: a control plane that runs many "actors" on a pool of worker pods, isolates each with gVisor or a microVM it drives itself, suspends and resumes them from snapshots in object storage, and brokers egress with credential injection.
+Install a complete agent-sandbox platform as NIC's sandboxing answer and have packs run untrusted work on it. Agent Substrate is the leading example (v0.6.0, released 2026-10-22; pre-1.0 with no compatibility guarantees; documented for GKE and kind only): a control plane that runs up to 1,000 "actors" in each worker pod, isolates each under gVisor or a Kata guest on Cloud Hypervisor that the worker downloads, verifies and starts itself rather than through a `RuntimeClass`, suspends and resumes them from snapshots in object storage, and brokers egress with credential injection through a shared gateway.
 
 - **Pros:** a much stronger boundary than rows 2 and 3, appropriate for attacker-influenced or multi-tenant code; egress policy, credential injection, suspend/resume and density come built in rather than being assembled by each pack; an ecosystem is forming around it.
 - **Cons:**
-  - Solves a different problem: it replaces the pod model (work runs as actors in the platform's worker pods) rather than fencing tools inside an existing pod such as a JupyterLab server, so packs would have to be re-architected around it.
-  - Cannot run on NIC's providers today: Agent Substrate needs Kubernetes 1.36 or later with beta pod-certificate APIs that managed services do not let you enable (realistically 1.37), enforced NetworkPolicy ([#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) is blocked), changes to GKE-specific node paths, and KVM-capable nodes for microVMs (not Hetzner Cloud).
-  - A weaker pod-level posture: its worker pods need added capabilities with seccomp and AppArmor unconfined (the relaxed-workload tier), which ADR-0010's hardened mode would have to admit by exception, whereas `process-self-restriction` runs under Pod Security `restricted`.
-  - A large operational footprint for a pre-1.0 project with no compatibility guarantees: API server, controller, router, egress gateway, node agent, Postgres and object storage.
+  - A different isolation unit: many actors share a worker pod, so NIC's pod-level guarantees (network policy, admission) cannot separate actors; that is the platform's job, and its isolation between actors on one node is still a roadmap item. (The earlier objection that it replaces the pod model no longer separates it from NIC's own direction, which also runs untrusted work in separate sandbox pods.)
+  - Cannot run on NIC's providers today: Agent Substrate needs Kubernetes 1.36 or later with beta pod-certificate APIs (`PodCertificateRequest`, `ClusterTrustBundle`) that managed services do not let you enable (realistically 1.37), enforced NetworkPolicy ([#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) is blocked), changes to GKE-specific node paths, and KVM-capable nodes for its microVM class (not Hetzner Cloud; its gVisor class needs none).
+  - A weaker pod-level posture: its worker pods are no longer `privileged`, but run as root with 13 added capabilities (including `SYS_ADMIN`, `NET_ADMIN`, `SYS_PTRACE`), seccomp and AppArmor unconfined, and `/dev/kvm` and `/dev/net/tun` for microVMs; its node agent mounts host paths. That is the relaxed-workload tier, which ADR-0010's hardened mode would have to admit by exception, whereas `process-self-restriction` runs under Pod Security `restricted`.
+  - A large operational footprint: API server, controller, router, egress gateway, node agent, an identity (OIDC) server, a pod-certificate signer, embedded OpenFGA, PostgreSQL and object storage.
 
-Not chosen as the starting point. The contract is designed so that such a platform can later provide `user-space-kernel` or `vm-boundary` through its own API (a system-provided capability), with its cluster requirements and privilege tier set in that capability's ADR. If packs converge on such a platform, the future `in-pod-namespaces` work can be deprioritised; `process-self-restriction` remains useful either way.
+Not chosen as the starting point. Because actors are not pods with published settings and the platform runs its own runtime binaries, it cannot simply provide a level through NIC's `RuntimeClass`; where it can run, it would be admitted as a separate platform on dedicated node groups with an exact privilege envelope, claiming a level that NIC records as claimed rather than verified (§20.6). If packs converge on such a platform, the future `in-pod-namespaces` work can be deprioritised; `process-self-restriction` remains useful either way.
 
 ### Option 7: Node-group labels from an image table
 
