@@ -65,6 +65,9 @@ Detailed implementation specifications and technical designs.
 20. **[Workload Sandboxing](implementation/20-workload-sandboxing.md)**
     Sandbox capabilities for software packs: spectrum, provider findings, delivery, verification and security (design behind ADR-0021)
 
+21. **[Immutable Node-Pool Rollouts](implementation/21-node-pool-rollouts.md)**
+    Blue/green replacement of node pools whose running nodes must never change: stored specs, phases, provider primitives (design behind ADR-0024)
+
 ### Operations
 
 Testing, deployment, and operational procedures.
