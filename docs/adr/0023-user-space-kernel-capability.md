@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT). Builds on [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md), which defines the capability contract and reserves the name `user-space-kernel`, and on [ADR-0022](0022-in-pod-namespaces-capability.md), whose "Next steps" name this capability as the preferred way to strengthen `in-pod-namespaces`; and on [ADR-0024](0024-immutable-node-pool-rollouts.md), which supplies its upgrade mechanism. This ADR cannot be accepted before them. Mechanisms, probe evidence and the verification checklist are in the design doc ([mechanisms](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-mechanisms-in-full), [evidence](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-probe-evidence-in-full)).
+Proposed (DRAFT). Builds on [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md), which defines the capability contract and reserves the name `user-space-kernel`, and on [ADR-0022](0022-in-pod-namespaces-capability.md), whose "Next steps" name this capability as the preferred way to strengthen `in-pod-namespaces`; and on [ADR-0024](0024-immutable-node-pool-rollouts.md), which supplies its upgrade mechanism. [ADR-0025](0025-untrusted-execution-pods.md) defines the guarantees around pods that run untrusted code, which this ADR's first qualified consumer relies on. This ADR cannot be accepted before them. Mechanisms, probe evidence and the verification checklist are in the design doc ([mechanisms](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-mechanisms-in-full), [evidence](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-probe-evidence-in-full)).
 
 ## Date
 
@@ -51,9 +51,14 @@ Chosen option: "Option 3", because it delivers a stronger boundary than ADR-0021
 
 ### The capability
 
-**`user-space-kernel`:** a pod that sets the `runtimeClassName` NIC publishes runs behind a user-space kernel that implements the Linux syscall interface. The guarantee names no product; gVisor is its first implementation. It applies to any pod that sets that runtime class: an agent's pod, a JupyterLab server, an app, a batch job or a per-session sandbox pod.
+**`user-space-kernel`:** a pod that sets the `runtimeClassName` NIC publishes runs behind a user-space kernel that implements the Linux syscall interface. The guarantee names no product; gVisor is its first implementation. It applies to any pod that sets that runtime class.
 
-The qualified consumer is a long-running, non-root interactive pod with every capability dropped (a JupyterLab server is the reference) running ADR-0022's qualified bubblewrap configurations inside it with a fresh `/proc` (`--proc /proc`), which hides other processes' command lines and is required for this consumer's confidentiality claim. Other workloads are expected to work but are not qualified until their pack has tested them.
+Two consumers are qualified:
+
+1. **A tool-execution sandbox pod** (the primary pattern): an agent runs in its own trusted pod, whatever that pod is (a coding agent, a chat assistant, a scheduled job, a notebook server), and runs its tool calls in a separate pod, usually one per session, reached over SSH or `kubectl exec`. The sandbox pod holds no credentials, may run as root, needs no bubblewrap, and has its network isolated from outside the pod under [ADR-0025](0025-untrusted-execution-pods.md); gVisor is the boundary between it and the host. Running common tools as root in such a pod under gVisor is to be verified.
+2. **Bubblewrap inside a long-running pod**: a non-root pod with every capability dropped that runs the agent and its tools together, fencing the tools with ADR-0022's qualified bubblewrap configurations and a fresh `/proc` (`--proc /proc`), which hides other processes' command lines and is required for this pattern's confidentiality claim. It suits packs that cannot split the agent from its tools.
+
+Other workloads are expected to work but are not qualified until their pack has tested them.
 
 ### What the operator configures
 
@@ -88,7 +93,7 @@ Opting in changes only the group's boot configuration. It does **not** keep foun
 4. **Failed nodes stay in service** for their other workloads; NIC does not retire them, since the autoscaler counts any Ready node as a successful scale-up. A persistent failure can therefore grow a group to its maximum, which operators keep modest.
 5. **`nic deploy` check, mandatory.** A smoke pod runs on each node of each opted-in group with the published settings and must pass the same checks; any failure fails the deploy, and groups at zero nodes are reported as unverified. In verification-only mode it runs on each node the named `RuntimeClass` can schedule to. `status.runtimeHandlers` is not evidence: it lists `runsc` after a failed install.
 6. **Published pod settings:** `runtimeClassName: gvisor` (in verification-only mode, the name the operator chose) and `seccompProfile: RuntimeDefault`. gVisor does not apply the pod's profile, so the pod passes Pod Security `restricted` without blocking bubblewrap. ADR-0022's "leave `seccompProfile` unset" applies only to bubblewrap on the host.
-7. **Upgrades replace node groups.** Opted-in pools are immutable pools under [ADR-0024](0024-immutable-node-pool-rollouts.md): a node's runtime never changes after it joins, and any change to what a node boots with (gVisor release or artifact, node image, runtime configuration, installer), or to the pool's opt-in or `dedicated` setting, creates a new generation. ADR-0024 builds it beside the old one, qualifies its infrastructure with this ADR's node check and smoke pods (including a pod with a PVC-backed home), moves workloads to it and only then retires the old one. Controller-less user servers end during a rollout rather than moving; whether a hub can start a new server on the new generation is the pack's acceptance test, which operators run before retiring the old one.
+7. **Upgrades replace node groups.** Opted-in pools are immutable pools under [ADR-0024](0024-immutable-node-pool-rollouts.md): a node's runtime never changes after it joins, and any change to what a node boots with (gVisor release or artifact, node image, runtime configuration, installer), or to the pool's opt-in or `dedicated` setting, creates a new generation. ADR-0024 builds it beside the old one, qualifies its infrastructure with this ADR's node check and smoke pods (including a pod with a PVC-backed home), moves workloads to it and only then retires the old one. Pods without a controller (per-session sandboxes, interactive servers) end during a rollout rather than moving; whether a pack can recreate them on the new generation is the pack's acceptance test, which operators run before retiring the old one.
 8. **Ownership.** On clusters NIC provisions, NIC owns the `RuntimeClass` and the node services (ADR-0024 owns generations and rollouts), refuses to adopt a `gvisor` `RuntimeClass` it did not create, and fails the deploy if it cannot create or update them. Requiring, provisioning and retiring are separate: `sandbox.require` only gates validation, provisioning follows opted-in groups, and NIC never deletes the `RuntimeClass` on its own, since packs may still name it; with no group opted in, `nic deploy` warns that it has no nodes.
 
 **Prerequisites.**
@@ -104,7 +109,8 @@ Each capability's published settings mean the same thing on every cluster, and a
 | The pack wants | Requirement | Result |
 |---|---|---|
 | Bubblewrap only | `in-pod-namespaces` | Bubblewrap on the host kernel where the host provides it (AL2023) |
-| Bubblewrap inside gVisor | `in-pod-namespaces` `within: user-space-kernel` | The qualified consumer; available wherever `user-space-kernel` is, including Hetzner |
+| Tool-execution sandbox pods | `user-space-kernel`, with ADR-0025's profile | Primary qualified consumer: root inside gVisor, no bubblewrap, network isolated from outside |
+| Bubblewrap inside gVisor | `in-pod-namespaces` `within: user-space-kernel` | Second qualified consumer; available wherever `user-space-kernel` is, including Hetzner |
 | gVisor only | `user-space-kernel` | gVisor with no inner sandbox |
 | Landlock and bubblewrap | `process-self-restriction` and `in-pod-namespaces` | Host kernel (AL2023) |
 | Landlock and gVisor | — | Not supported: Landlock is unavailable inside gVisor |
@@ -113,7 +119,7 @@ On Hetzner, requiring `in-pod-namespaces` without `within: user-space-kernel` is
 
 ### What a pack does
 
-It applies the published settings, never pins gVisor pods to groups that are not opted in, and for bubblewrap inside gVisor uses ADR-0022's qualified configurations with a fresh `/proc`, refusing to run commands unsandboxed if its startup check fails. It does not rely on Landlock inside gVisor, keeps environments and package caches off network homes, watches files changed from other pods by polling rather than inotify, and tolerates restarts during rollouts.
+It applies the published settings and never pins gVisor pods to groups that are not opted in. For tool-execution sandboxes it keeps every credential in the agent's pod and creates sandbox pods under ADR-0025's profile; for bubblewrap inside gVisor it uses ADR-0022's qualified configurations with a fresh `/proc`. Either way it refuses to run commands unsandboxed if its startup check fails. It does not rely on Landlock inside gVisor, keeps environments and package caches off network homes, watches files changed from other pods by polling rather than inotify, and tolerates restarts during rollouts.
 
 ### Verification
 
@@ -149,7 +155,7 @@ Before a provider, architecture, OS family and toolchain are listed, and on ever
 - **Option 3 (chosen):** confines change to opted-in groups, at the cost of a per-group setting, a node-side check and extra capacity during rollouts. Rejected variants (self-retiring failed nodes, a failure taint, a release-pinned label, in-place upgrades with or without draining) are in the design doc.
 - **Option 4 (privileged DaemonSet installer):** easy to ship, but a privileged component in the cluster that restarts containerd on running nodes and races new nodes joining.
 - **Option 5 (Kata, `vm-boundary`):** a hardware boundary, but it needs nested virtualisation or bare metal (unavailable on Hetzner Cloud) and costs more per pod. The route on AKS, and a later ADR.
-- **Option 6 (a gVisor pod per session):** the strongest design for the threat model, since commands run where the agent's credentials never are, but it costs a pod start per session, workspace sharing and permission for packs to create pods. It can follow this ADR, using its `RuntimeClass`.
+- **Option 6 (a gVisor pod per session):** not an alternative to Option 3 but a way to consume it, and now its primary qualified consumer: commands run where the agent's credentials never are, at the cost of a pod start per session and workspace sharing. The request layer belongs to packs; the guarantees around such pods are ADR-0025's.
 - **Option 7 (NIC-owned seccomp profile):** weaker and more work; remains ADR-0022's fallback if gVisor proves impractical.
 
 ## Open Questions
@@ -174,6 +180,7 @@ Found while probing for this ADR and reported to the NIC team (links to be added
 - [ADR-0021: Gradual Workload Sandboxing Capability for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
 - [ADR-0022: In-Pod Namespace Sandboxes](0022-in-pod-namespaces-capability.md)
 - [ADR-0024: Immutable Node-Pool Rollouts](0024-immutable-node-pool-rollouts.md)
+- [ADR-0025: Guarantees for Untrusted-Execution Pods](0025-untrusted-execution-pods.md)
 - [Design doc: Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md)
 - [ADR-0010: High-Security Mode](0010-high-security-mode.md)
 - [gVisor](https://gvisor.dev/)
