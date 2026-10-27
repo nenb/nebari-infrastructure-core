@@ -18,6 +18,7 @@ For each namespace in `sandbox.untrusted_execution.namespaces`, NIC creates (or,
 | `ValidatingAdmissionPolicy` `nic-untrusted-execution-pods` | Pod rules (22.3) |
 | `ValidatingAdmissionPolicy` `nic-untrusted-execution-netpol` | NetworkPolicy rules (22.4) |
 | Default ServiceAccount with `automountServiceAccountToken: false` | Belt and braces; the admission policy is the guarantee |
+| `LimitRange` `nic-sandbox-defaults` and `ResourceQuota` `nic-sandbox-quota` | Default and maximum CPU, memory and ephemeral storage per container; namespace totals (22.11) |
 
 Cluster-wide, once per cluster that uses the profile:
 
@@ -176,3 +177,23 @@ EKS 1.34 in us-east-1 deployed with NIC from `main`; probe groups `gv` (m6i.larg
 - **Start-up window:** 1.0–1.4 s of direct egress per new pod in standard mode (six runs, both runtimes); none within 30 s in strict mode, where allowed routes opened after 1.4–1.8 s.
 - **Admission:** a `ValidatingAdmissionPolicy` bound to sandbox namespaces passed all eleven cases (missing runtime class, token automount, Secret, projected token and hostPath volumes, host namespaces, Secrets in the environment, compliant pods admitted, other namespaces unaffected) once it matched `pods/ephemeralcontainers` and forbade ephemeral containers.
 - **Dedicated pools:** sandbox pods landed only on their groups through their `RuntimeClass`es, but a runc pod that added the toleration ran on the gVisor node; the cluster-wide toleration policy (22.2) rejected it and still admitted sandbox pods.
+
+## 22.11 Resource limits, tenancy and observability
+
+**Resource limits.** Untrusted code's cheapest attack is on cost: mining, fork bombs, runaway builds and disk filling.
+
+| Limit | Mechanism | Set by |
+|---|---|---|
+| Processes per pod | kubelet `podPidsLimit`, node-level: on EKS in the sandbox group's `nodeadm` `NodeConfig` (`kubelet.config.podPidsLimit`); on k3s through the pool's kubelet arguments (`--kubelet-arg=pod-max-pids=<n>`). Proposed default 4096 | NIC, on sandbox node groups; applies to every pod on them, which on dedicated pools are sandboxes and node agents |
+| CPU, memory, ephemeral storage per container | `LimitRange` defaults and maxima in each namespace; the admission policy rejects containers above the maxima | NIC sets defaults; packs size pods within them |
+| Namespace totals | `ResourceQuota` (CPU, memory, ephemeral storage, pods, PVCs and requested storage) | NIC, from operator values |
+| Lifetime | Admission requires `activeDeadlineSeconds` no longer than the configured maximum (proposed 24 h) | Packs set it; NIC enforces the maximum |
+
+Ephemeral-storage limits evict a pod that fills its node's disk; PVC-backed workspaces are bounded by their requested size and the quota. Values belong in the stored spec of the sandbox node groups where they are node-level (ADR-0024), so changing the process cap is a rollout. To be verified: that the process cap applies inside gVisor and Kata pods as on runc (gVisor's sandbox and Kata's VM processes are counted in the pod's cgroup on the host, but the limit seen by code inside may differ).
+
+**Workspace rule.** In the tool-execution pattern the sandbox writes the shared workspace and the trusted agent pod reads it. Content written by untrusted code can attack the trusted side without any escape: Git hooks and configuration (`core.fsmonitor`, `core.hooksPath`), `.envrc`, shell start-up files, editor and language-server configuration, build files a trusted tool might run, and files the agent parses into prompts. Packs run Git with hooks disabled and safe configuration on the trusted side, never source or execute workspace files there, and treat parsed content as untrusted input. NIC cannot see this boundary, so it is a pack obligation, stated in ADR-0025.
+
+**Tenancy.** Dedicated pools keep sandboxes away from foundational services but not from each other. A runtime escape or a side channel (cache timing, shared CPU resources) between sandboxes on one node is not addressed by the profile; the operator's answer is a `hardware-virtualised` floor (ADR-0021, ADR-0026) and, where needed, separate pools per group of users. Confidential computing (protecting the guest from the operator, for example Confidential Containers on SEV-SNP or TDX) and in-process tool sandboxes (WebAssembly, V8 isolates) are outside the profile.
+
+**Observability (deferred).** The first delivery records no audit trail beyond the pack's proxy. Where it plugs in later: denied-traffic logging from the network policy agent (the VPC CNI's policy-event logs on AWS, kube-router's on k3s), set alongside strict-mode enforcement; gVisor's runtime monitoring, which streams process and system-call events, and Kata's runtime events, set in the runtime configuration that ADR-0024 pins per generation; and sandbox pod lifecycle events. Denial logging is a "should" for the first delivery, because without it operators debug default-deny blind.
+
