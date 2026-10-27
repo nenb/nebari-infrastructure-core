@@ -15,7 +15,7 @@ One record per immutable pool, in a ConfigMap NIC owns (the location is an open 
 | `nicVersion` | The NIC version that started the rollout |
 | `holder` | The lock holder that last wrote the record; every write is a compare-and-swap on the object's `resourceVersion` |
 
-A stored spec holds everything NIC renders a group from: instance type, node image release, availability zones, sizes, labels, taints, every boot input (the trust bundle and the consumer's inputs) and the NIC and module versions. Renderers for immutable groups take a stored spec, not the config. On AWS, the tfvars for an immutable pool are built from `current` (and `next` during a rollout); a config change that alters the rendered spec becomes a new `next`. Steady state uses the same path, so a shared-input change never rewrites a serving group.
+A stored spec holds everything NIC renders a group from: instance type, node image release, availability zones, sizes, labels, taints, every boot input (the trust bundle and the consumer's inputs, including the boundary implementation resolved under ADR-0021, so a change of implementation is a new generation) and the NIC and module versions. Renderers for immutable groups take a stored spec, not the config. On AWS, the tfvars for an immutable pool are built from `current` (and `next` during a rollout); a config change that alters the rendered spec becomes a new `next`. Steady state uses the same path, so a shared-input change never rewrites a serving group.
 
 ## 21.2 Phases
 
@@ -34,7 +34,7 @@ A stored spec holds everything NIC renders a group from: instance type, node ima
 
 **After each drained node:** no pod of the pool Pending for longer than a timeout (5 minutes proposed), except the consumer's declared pods; every controller with evicted pods back to its desired Ready replicas; no PersistentVolumeClaim of the pool's pods stuck attaching. Any failure stops the rollout with the node cordoned and both generations kept.
 
-**Lock.** One cluster-wide lock, held by every mutating command (`nic deploy`, `nic rollout`, `nic destroy`) from reading the record to the end of its last apply. On AWS it is an object beside the state file in the state bucket (`<project>/nic.lock`), created with a conditional write so only one holder can create it, and holding the holder's identity, start time and last renewal (renewed every 15 s, expiring after 60 s, proposed). OpenTofu's own state lock covers one operation; this one covers the whole command. Where there is no remote state (Hetzner), the lock is a `coordination.k8s.io/v1` `Lease` `nic-mutation` once the cluster exists. Applies use saved plans (`plan -out`, then `apply` of that file) instead of today's plan followed by an apply that plans again (`pkg/providers/cluster/aws/provider.go`), so OpenTofu rejects a plan whose state changed after it was made (observed with OpenTofu 1.11.3 and a local backend on 2026-10-27: `Saved plan is stale`, exit code 1; the S3 backend is still to be checked).
+**Lock.** One cluster-wide lock, held by every mutating command (`nic deploy`, `nic rollout`, `nic destroy`) from reading the record to the end of its last apply. On AWS it is an object beside the state file in the state bucket (`<project>/nic.lock`), created with a conditional write so only one holder can create it, and holding the holder's identity, start time and last renewal (renewed every 15 s, expiring after 60 s, proposed). OpenTofu's own state lock covers one operation; this one covers the whole command. Where there is no remote state (Hetzner), the lock is a `coordination.k8s.io/v1` `Lease` `nic-mutation` once the cluster exists. Applies use saved plans (`plan -out`, then `apply` of that file) instead of today's plan followed by an apply that plans again (`pkg/providers/cluster/aws/provider.go`), so OpenTofu rejects a plan whose state changed after it was made (observed with OpenTofu 1.11.3 on 2026-10-27, with a local backend and with the S3 backend using `use_lockfile`: `Saved plan is stale`, exit code 1, and the state kept the other process's change).
 
 **Losing and finding the lock.** A holder that fails to renew starts no new step, lets provider operations already in flight finish, writes nothing more and exits with an error. A run that finds a lock it does not hold refuses, whether or not the lock has expired, and reports the holder and its last renewal; the operator confirms that process has stopped and runs `nic unlock`, which then reconciles every phase's observations before anything else. Record writes are compare-and-swap and name the holder, so a stale holder's record writes fail; direct provider API calls are not fenced, which is why there is no automatic takeover.
 
@@ -67,7 +67,9 @@ Observations are from the probe run of 2026-10-27 (design doc §20, "EKS: node c
 3. Adding and retiring individual Hetzner pools: **adding yes; retiring needs NIC to delete nodes and servers itself.**
 4. Excluding a Hetzner pool from k3s upgrades: **yes for upgrades, but `create` reinstalls static pools**, hence autoscaled pools only.
 
-Still open: the saved-plan rejection against the S3 backend (observed with a local backend), and everything in §21.5 that needs NIC's implementation.
+5. Saved-plan rejection: **yes**, with a local backend and with the S3 backend (`use_lockfile`), OpenTofu 1.11.3.
+
+Still open: everything in §21.5 that needs NIC's implementation.
 
 ## 21.5 Verification checklist
 
