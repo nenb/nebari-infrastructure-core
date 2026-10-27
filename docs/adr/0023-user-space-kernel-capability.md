@@ -19,7 +19,7 @@ ADR-0021 lets an agent's commands restrict themselves with Landlock. ADR-0022 le
 - bubblewrap's qualified configurations work inside gVisor, and a fresh `/proc` and pid namespace there close ADR-0022's remaining gaps;
 - gVisor installs at boot on opted-in pools, including autoscaled nodes, and a failed install never runs a pod unsandboxed;
 - storage presenting real ownership works (FSx for OpenZFS), while EFS access points as NIC configures them do not;
-- common data-science tooling works; file-heavy work on network homes is 1.4–1.8× slower;
+- common data-science tooling works, but file watchers in a gVisor pod see changes made from other pods only by polling; file-heavy work on network homes is 1.4–1.8× slower;
 - nodes may change their own labels but not their taints, and on k3s such a change reverts at the next agent restart.
 
 **Precedents.** GKE Sandbox installs gVisor on chosen node pools and pods opt in with `runtimeClassName: gvisor`; the [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) project and many agent platforms do the same. AKS's built-in equivalent uses Kata VMs.
@@ -113,7 +113,7 @@ On Hetzner, requiring `in-pod-namespaces` without `within: user-space-kernel` is
 
 ### What a pack does
 
-It applies the published settings, never pins gVisor pods to groups that are not opted in, and for bubblewrap inside gVisor uses ADR-0022's qualified configurations with a fresh `/proc`, refusing to run commands unsandboxed if its startup check fails. It does not rely on Landlock inside gVisor, keeps environments and package caches off network homes, and tolerates restarts during rollouts.
+It applies the published settings, never pins gVisor pods to groups that are not opted in, and for bubblewrap inside gVisor uses ADR-0022's qualified configurations with a fresh `/proc`, refusing to run commands unsandboxed if its startup check fails. It does not rely on Landlock inside gVisor, keeps environments and package caches off network homes, watches files changed from other pods by polling rather than inotify, and tolerates restarts during rollouts.
 
 ### Verification
 
@@ -137,7 +137,7 @@ Before a provider, architecture, OS family and toolchain are listed, and on ever
 **Bad:**
 - Rollouts restart users' sessions and disrupt other workloads on shared groups, and need a second group's capacity while they run (ADR-0024).
 - Failed nodes waste capacity until an operator replaces them, and repeated failures can grow a group to its maximum.
-- File-heavy work on network homes and JupyterLab startup are slower, debugging unrelated processes does not work, and memory headroom under a limit is slightly lower (about 16 MiB at 512 MiB).
+- File-heavy work on network homes and JupyterLab startup are slower, file watchers miss changes from other pods unless they poll, debugging unrelated processes does not work, and memory headroom under a limit is slightly lower (about 16 MiB at 512 MiB).
 - Deployments with homes on EFS access points cannot adopt it until the homes move; isolation from foundational services needs `dedicated: true`.
 - Implementation work across NIC and its EKS module, plus ADR-0024, and continuing work to follow gVisor releases and re-qualify on gVisor, k3s and node-image changes.
 - No GPU qualification (`nvproxy`), no AKS support (it needs `vm-boundary`), and no Landlock inside gVisor.
