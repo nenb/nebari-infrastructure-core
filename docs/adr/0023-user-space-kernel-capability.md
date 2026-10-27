@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT). Builds on [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md), which defines the capability contract and reserves the name `user-space-kernel`, and on [ADR-0022](0022-in-pod-namespaces-capability.md), whose "Next steps" name this capability as the preferred way to strengthen `in-pod-namespaces`; this ADR cannot be accepted before them. Mechanisms, probe evidence and the verification checklist are in the design doc ([mechanisms](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-mechanisms-in-full), [evidence](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-probe-evidence-in-full)).
+Proposed (DRAFT). Builds on [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md), which defines the capability contract and reserves the name `user-space-kernel`, and on [ADR-0022](0022-in-pod-namespaces-capability.md), whose "Next steps" name this capability as the preferred way to strengthen `in-pod-namespaces`; and on [ADR-0024](0024-immutable-node-pool-rollouts.md), which supplies its upgrade mechanism. This ADR cannot be accepted before them. Mechanisms, probe evidence and the verification checklist are in the design doc ([mechanisms](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-mechanisms-in-full), [evidence](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-probe-evidence-in-full)).
 
 ## Date
 
@@ -78,7 +78,7 @@ sandbox:
 
 `within:` extends ADR-0021's `sandbox.require`: the inner capability is needed inside the named one, which it implies.
 
-Opting in changes only the group's boot configuration. It does **not** keep foundational services (Keycloak, its database, ArgoCD) off the group; that needs `dedicated: true`, which defaults to `false` because ADR-0021's threat model is an agent's own commands rather than a host escape, and dedication costs capacity. Operators who treat agent code as adversarial should set it. Control-plane groups cannot opt in. Opting an existing group in or out, or changing `dedicated`, is a rollout like an upgrade (step 7).
+Opting in changes only the group's boot configuration. It does **not** keep foundational services (Keycloak, its database, ArgoCD) off the group; that needs `dedicated: true`, which defaults to `false` because ADR-0021's threat model is an agent's own commands rather than a host escape, and dedication costs capacity. Operators who treat agent code as adversarial should set it. Control-plane groups cannot opt in. Opting an existing group in or out, or changing `dedicated`, is a rollout (step 7).
 
 ### What NIC does
 
@@ -88,14 +88,14 @@ Opting in changes only the group's boot configuration. It does **not** keep foun
 4. **Failed nodes stay in service** for their other workloads; NIC does not retire them, since the autoscaler counts any Ready node as a successful scale-up. A persistent failure can therefore grow a group to its maximum, which operators keep modest.
 5. **`nic deploy` check, mandatory.** A smoke pod runs on each node of each opted-in group with the published settings and must pass the same checks; any failure fails the deploy, and groups at zero nodes are reported as unverified. In verification-only mode it runs on each node the named `RuntimeClass` can schedule to. `status.runtimeHandlers` is not evidence: it lists `runsc` after a failed install.
 6. **Published pod settings:** `runtimeClassName: gvisor` (in verification-only mode, the name the operator chose) and `seccompProfile: RuntimeDefault`. gVisor does not apply the pod's profile, so the pod passes Pod Security `restricted` without blocking bubblewrap. ADR-0022's "leave `seccompProfile` unset" applies only to bubblewrap on the host.
-7. **Upgrades replace node groups (blue/green).** Operators name a pool (`user`); NIC names its physical groups `user-<generation>`, where the generation is a hash of everything a node boots with (gVisor release and artifact digest, node image, container runtime configuration, installer version), and the `RuntimeClass` and packs select only stable pool labels. When the generation changes, `nic deploy` pre-flights the new artifact and then moves through recorded phases: it **creates** a green group beside the unchanged blue one, held off ordinary workloads; **verifies** it with smoke pods, including a representative PVC-backed pod; **promotes** it; **closes** blue to new capacity and workloads (cordoning alone is not enough, since the autoscaler would replenish it); **drains** blue node by node, respecting disruption budgets; and **deletes** blue only once it is empty. The phase is recorded in the cluster, so an interrupted rollout resumes at the next `nic deploy`; on any failure NIC stops and keeps both groups rather than deleting one, and never rolls back automatically once workloads have moved. Before promotion a failed green holds no workloads and may be discarded. A pool has at most two generations, so a new generation waits for an unfinished rollout to finish. Groups that are not opted in keep their provider's normal updates.
-8. **Ownership.** On clusters NIC provisions, NIC owns the `RuntimeClass`, the physical groups of each generation, the rollout record and the node services, refuses to adopt a `gvisor` `RuntimeClass` it did not create, and fails the deploy if it cannot create or update them. Requiring, provisioning and retiring are separate: `sandbox.require` only gates validation, provisioning follows opted-in groups, and NIC never deletes the `RuntimeClass` on its own, since packs may still name it; with no group opted in, `nic deploy` warns that it has no nodes.
+7. **Upgrades replace node groups.** Opted-in pools are immutable pools under [ADR-0024](0024-immutable-node-pool-rollouts.md): a node's runtime never changes after it joins, and any change to what a node boots with (gVisor release or artifact, node image, runtime configuration, installer), or to the pool's opt-in or `dedicated` setting, creates a new generation. ADR-0024 builds it beside the old one, verifies it with this ADR's node check and smoke pods (including a pod with a PVC-backed home), moves workloads to it and only then retires the old one. Controller-less user servers end during a rollout rather than moving; for them, success means a new server starts on the new generation.
+8. **Ownership.** On clusters NIC provisions, NIC owns the `RuntimeClass` and the node services (ADR-0024 owns generations and rollouts), refuses to adopt a `gvisor` `RuntimeClass` it did not create, and fails the deploy if it cannot create or update them. Requiring, provisioning and retiring are separate: `sandbox.require` only gates validation, provisioning follows opted-in groups, and NIC never deletes the `RuntimeClass` on its own, since packs may still name it; with no group opted in, `nic deploy` warns that it has no nodes.
 
 **Prerequisites.**
 
-- **Supported storage.** gVisor checks file permissions itself, so volumes its pods write to must present real ownership matching the pod's UID or `fsGroup`. FSx for OpenZFS qualifies and EBS is expected to; EFS access points as NIC configures them do not, and homes on them must move under NIC's storage plan ([PR #586](https://github.com/nebari-dev/nebari-infrastructure-core/pull/586)) first. This ADR provides no migration. Retiring a group must not lose data, so opted-in groups need storage that keeps no data on the nodes: delivery depends on NIC's replacement for node-local block storage, and `nic validate` rejects opted-in groups until then. A green group spans the same availability zones as blue, so zonal volumes can follow their pods.
-- **AWS.** Per-node-group bootstrap in NIC's EKS module, and staged applies that keep both generations in the configuration until blue is retired.
-- **Hetzner.** Node-pool labels and pre-k3s boot commands in NIC's generated configuration, adding and retiring individual pools (NIC wraps only cluster-wide `hetzner-k3s create` and `delete` today), home storage with real ownership, and the NIC team's fix for the metadata service exposing the k3s join token to pods.
+- **Supported storage.** gVisor checks file permissions itself, so volumes its pods write to must present real ownership matching the pod's UID or `fsGroup`. FSx for OpenZFS qualifies and EBS is expected to; EFS access points as NIC configures them do not, and homes on them must move under NIC's storage plan ([PR #586](https://github.com/nebari-dev/nebari-infrastructure-core/pull/586)) first. This ADR provides no migration. Retiring a group must not lose data, so opted-in groups need storage that keeps no data on the nodes: delivery depends on NIC's replacement for node-local block storage, and `nic validate` rejects opted-in groups until then.
+- **AWS.** Per-node-group bootstrap in NIC's EKS module, and ADR-0024's AWS prerequisites.
+- **Hetzner.** Node-pool labels and pre-k3s boot commands in NIC's generated configuration, ADR-0024's Hetzner prerequisites (including a lifecycle for individual pools), home storage with real ownership, and the NIC team's fix for the metadata service exposing the k3s join token to pods.
 
 ### Combining capabilities
 
@@ -123,7 +123,7 @@ Before a provider, architecture, OS family and toolchain are listed, and on ever
 
 - **Stronger than ADR-0021 and ADR-0022, but not a VM.** An escape from gVisor reaches the host and whatever else runs on the node, which without `dedicated: true` can include foundational services. Code an agent executes should be treated as attacker-influenced.
 - **gVisor's own trade-offs.** Its default *directfs* mode opens host files directly, and its *systrap* platform, needed without hardware virtualisation, lacks the extra isolation of its KVM platform. NIC pins one gVisor release per NIC release and treats gVisor security releases like its own fixes.
-- **Patch status.** A node's release never changes, so every sandbox on it runs the release its label records. A rollout is complete when blue is deleted; until then `nic deploy` and `nic outputs` report the pool as partly patched.
+- **Patch status.** A node's release never changes, so every sandbox on it runs the release its label records. A rollout is complete when the old generation is retired; until then `nic outputs` reports the pool as partly patched.
 - **Network.** This ADR relies on no NetworkPolicy, since additive policies cannot guarantee a deny: on AWS the metadata service is unreachable (IMDSv2, hop limit 1), and on Hetzner the capability waits for the NIC team's fix. gVisor does not stop a pod reaching network storage; the sandbox's no-network configuration blocks it for the agent's commands, and for the pod it depends on the NIC team's storage work.
 - **Declared seccomp is not enforced.** Without `--oci-seccomp`, gVisor ignores the pod's `seccompProfile`, so `RuntimeDefault` satisfies policy checks without being enforced; gVisor's own syscall implementation and host-side filter apply instead. Documentation for hardened mode ([ADR-0010](0010-high-security-mode.md)) and for auditors says so; `--oci-seccomp` would block bubblewrap.
 
@@ -135,11 +135,11 @@ Before a provider, architecture, OS family and toolchain are listed, and on ever
 - Bubblewrap inside gVisor reaches Hetzner and closes ADR-0022's signalling and command-line gaps.
 
 **Bad:**
-- Rollouts restart users' sessions and disrupt other workloads on shared groups, need a second group's capacity while they run, and leave rollout state that NIC must record and resume.
+- Rollouts restart users' sessions and disrupt other workloads on shared groups, and need a second group's capacity while they run (ADR-0024).
 - Failed nodes waste capacity until an operator replaces them, and repeated failures can grow a group to its maximum.
 - File-heavy work on network homes and JupyterLab startup are slower, debugging unrelated processes does not work, and memory headroom under a limit is slightly lower (about 16 MiB at 512 MiB).
 - Deployments with homes on EFS access points cannot adopt it until the homes move; isolation from foundational services needs `dedicated: true`.
-- Implementation work across NIC and its EKS module, including a pool lifecycle for Hetzner, and continuing work to follow gVisor releases and re-qualify on gVisor, k3s and node-image changes.
+- Implementation work across NIC and its EKS module, plus ADR-0024, and continuing work to follow gVisor releases and re-qualify on gVisor, k3s and node-image changes.
 - No GPU qualification (`nvproxy`), no AKS support (it needs `vm-boundary`), and no Landlock inside gVisor.
 
 ## Options Detail
@@ -173,6 +173,7 @@ Found while probing for this ADR and reported to the NIC team (links to be added
 
 - [ADR-0021: Gradual Workload Sandboxing Capability for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
 - [ADR-0022: In-Pod Namespace Sandboxes](0022-in-pod-namespaces-capability.md)
+- [ADR-0024: Immutable Node-Pool Rollouts](0024-immutable-node-pool-rollouts.md)
 - [Design doc: Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md)
 - [ADR-0010: High-Security Mode](0010-high-security-mode.md)
 - [gVisor](https://gvisor.dev/)
