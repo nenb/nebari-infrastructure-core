@@ -56,7 +56,7 @@ Chosen option: "Option 3", because it makes today's behaviour declared and check
 
 **`in-pod-namespaces`:** a non-root process with no added capabilities, in a container that uses the pod settings NIC publishes for this capability, can create a user namespace that maps **only its own UID and GID**, and mount, network, IPC and UTS namespaces inside it. The container's masked `/proc` is retained (bind-mounted, not freshly mounted), so no pid namespace with a fresh procfs is guaranteed.
 
-The guarantee names the published settings rather than a particular profile. That is what lets the implementation change: today the published seccomp setting is **none**; a `user-space-kernel` implementation would add `runtimeClassName: gvisor`, and the fallback filtered implementation would publish a `Localhost` profile such as `nebari-sandbox-v1`. Packs that apply the published settings keep working without changes.
+The guarantee names the published settings rather than a particular profile. That is what lets the implementation change: today the published seccomp setting is **none**; at a higher boundary level the resolved implementation's settings apply (ADR-0021: a level-named `RuntimeClass` such as `nebari-mediated-kernel`), and the fallback filtered implementation would publish a `Localhost` profile such as `nebari-sandbox-v1`. Packs that apply the published settings keep working without changes.
 
 Qualification uses one pinned bubblewrap version in a capability test and two consumer configurations, which must not be confused:
 
@@ -72,8 +72,11 @@ A requirement, using ADR-0021's `sandbox.require`:
 ```yaml
 sandbox:
   require:
-    - capability: in-pod-namespaces
+    capabilities:
+      - name: in-pod-namespaces
 ```
+
+At the default boundary level (`shared-kernel`) this means bubblewrap on the host kernel, as below. With a higher `boundary`, ADR-0021's resolution picks an implementation that provides the capability as a property (for example gVisor at `mediated-kernel`), or fails naming the gap.
 
 There is no node-group opt-in in the first implementation, because NIC changes no node; a per-node-group `sandbox` block would arrive only with an implementation that changes nodes.
 
@@ -81,7 +84,7 @@ There is no node-group opt-in in the first implementation, because NIC changes n
 
 1. **`nic validate`.** Each cluster provider reports in `InfraSettings.Sandbox` whether its nodes are expected to allow the capability, from the node OS it provisions: AWS with AL2023 yes; Hetzner (Ubuntu 24.04: user namespaces restricted and AppArmor) no; AKS with Ubuntu (AppArmor) no; pinned images, `existing` and kind unknown. A known "no" with the capability required is an error, before any infrastructure exists.
 2. **`nic deploy` check, per node.** Once nodes are up, NIC reads each node's kubelet configuration through the API (`/api/v1/nodes/<node>/proxy/configz`, no pod needed) and confirms `seccompDefault` is off, and reads the node's OS image (`node.status.nodeInfo.osImage`) and confirms it belongs to an OS family qualified for the capability (AL2023 today). A node that fails either fails the deploy when the capability is required. Results are shown by `nic outputs`. As in ADR-0021, the requirement applies to every node, because the first implementation does not steer pods to a subset of node groups.
-3. **Publish the pod settings.** NIC publishes the capability's pod settings through the same documented route as ADR-0021's consumer integration, shown by `nic outputs`: today, "seccomp: none (leave `seccompProfile` unset)". These settings are for bubblewrap on the host kernel; when `in-pod-namespaces` is required within `user-space-kernel` (ADR-0023), the containing runtime's published settings apply instead. Helm key names follow ADR-0003 and #670 when that settles.
+3. **Publish the pod settings.** NIC publishes the capability's pod settings through the same documented route as ADR-0021's consumer integration, shown by `nic outputs`: today, "seccomp: none (leave `seccompProfile` unset)". These settings are for bubblewrap on the host kernel; when `in-pod-namespaces` is required at a higher boundary level, the resolved implementation's published settings apply instead. Helm key names follow ADR-0003 and #670 when that settles.
 
 NIC writes no profile, changes no node, adds no taint, installs no admission policy and adds no CLI command.
 
@@ -120,7 +123,7 @@ One limit of the qualified configurations remains: with the container's `/proc` 
 **Bad:**
 - Containers using the capability run with no syscall filter; a gVisor pod or the fallback filtered implementation would narrow that.
 - Packs using it cannot run under Pod Security `restricted`.
-- AWS AL2023 only; Hetzner and AKS would get the capability through `user-space-kernel` (or the fallback plus AppArmor work).
+- AWS AL2023 only at `shared-kernel`; Hetzner and AKS would get the capability at `mediated-kernel` or above, where an implementation provides it (or through the fallback plus AppArmor work).
 - The check relies on EKS leaving `seccompDefault` off and on the OS image identifying the node's AppArmor and user-namespace posture; if either changes, the capability disappears from those clusters (with an error, not silently).
 - A reference consumer, maintained with NIC's user-journey tests until an upstream pack adopts the capability, is one more thing NIC's maintainers own.
 
