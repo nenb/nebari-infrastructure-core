@@ -99,6 +99,13 @@ A pool is **immutable** when a consumer ADR requires it; ADR-0023's opted-in poo
 - Can very large pools stage a new generation in parts rather than at full size?
 - Should NIC support static immutable pools on Hetzner, which would need `hetzner-k3s create` to stop reinstalling k3s on them?
 
+## Related issues (to do)
+
+Found while probing for this ADR; not yet reported to the NIC team:
+
+- **`nic destroy` on AWS times out deleting VPC endpoints.** NIC's EKS module creates about ten interface endpoints, each with a network interface per private subnet, and sets no `timeouts` on `aws_vpc_endpoint`, so the AWS provider's 10-minute default applies. AWS deletes them asynchronously and sometimes takes longer; the first `nic destroy` then fails and a second run completes (seen in two probe sessions). To do: a longer delete timeout (20–30 minutes) in the module's `vpc-endpoints` submodule, and possibly one automatic retry in NIC for this known transient error. Retiring generations (step 8) deletes node groups on every rollout, so slow AWS deletions matter here too.
+- **Cost of the interface endpoints.** About ten endpoints across three availability zones cost roughly $200 a month per cluster, on top of the NAT gateway. To do: ask whether the set can be trimmed or made optional for small clusters.
+
 ## Links
 
 - [ADR-0023: User-Space Kernel Sandboxes with gVisor](0023-user-space-kernel-capability.md)
