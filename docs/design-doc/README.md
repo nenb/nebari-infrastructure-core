@@ -68,6 +68,9 @@ Detailed implementation specifications and technical designs.
 21. **[Immutable Node-Pool Rollouts](implementation/21-node-pool-rollouts.md)**
     Blue/green replacement of node pools whose running nodes must never change: stored specs, phases, provider primitives (design behind ADR-0024)
 
+22. **[Untrusted-Execution Pods](implementation/22-untrusted-execution-pods.md)**
+    Namespace profile for pods that run agents' tool calls: enforced default-deny networking, admission rules, sandbox runtimes, deploy probe (design behind ADR-0025)
+
 ### Operations
 
 Testing, deployment, and operational procedures.
