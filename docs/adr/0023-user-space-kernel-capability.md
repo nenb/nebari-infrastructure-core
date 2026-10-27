@@ -17,12 +17,10 @@ ADR-0021 lets an agent's commands restrict themselves with Landlock. ADR-0022 le
 **Evidence.** Probe runs on a local VM, EKS (AL2023 x86, with EFS and with FSx for OpenZFS) and Hetzner (Ubuntu 24.04 x86, k3s), using test-only installers, found that:
 
 - bubblewrap's qualified configurations work inside gVisor, and a fresh `/proc` and pid namespace there close ADR-0022's remaining gaps;
-- gVisor installs at boot on opted-in pools, including autoscaled nodes, can be swapped on a running k3s node through its upgrade controller, and a failed install never runs a pod unsandboxed;
+- gVisor installs at boot on opted-in pools, including autoscaled nodes, and can be swapped on a running k3s node; a failed install never runs a pod unsandboxed;
 - storage presenting real ownership works (FSx for OpenZFS), while EFS access points as NIC configures them do not;
-- common data-science tooling works; file-heavy work on network homes is 1.4–1.8× slower, and under a 512 MiB limit gVisor pods were killed about 16 MiB earlier than runc pods;
+- common data-science tooling works; file-heavy work on network homes is 1.4–1.8× slower;
 - nodes may change their own labels but not their taints, and on k3s such a change reverts at the next agent restart.
-
-The [evidence summary and detail](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-probe-evidence-in-full) are in the design doc.
 
 **Precedents.** GKE Sandbox installs gVisor on chosen node pools and pods opt in with `runtimeClassName: gvisor`; the [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) project and many agent platforms do the same. AKS's built-in equivalent uses Kata VMs.
 
@@ -32,8 +30,8 @@ The [evidence summary and detail](../design-doc/implementation/20-workload-sandb
 - **Relax nothing on the host.** No user namespaces, AppArmor changes or custom seccomp profiles for pods.
 - **Let someone else own the hard part.** Prefer a runtime whose security filter is maintained upstream over a NIC-owned policy.
 - **Install at boot, not from inside the cluster.** No privileged installer pods, except where a provider's existing upgrade mechanism already runs privileged jobs.
-- **Confine change.** Installation, upgrades and failures touch only node groups the operator chose, and a failure of this optional runtime never takes down a node's other workloads.
-- **Promise only what is verified.** Every guarantee is backed by a check that exercises the path consumers use, and every limit is enforced in the cluster, not by NIC staying alive.
+- **Confine change.** Installation, upgrades and failures touch only opted-in node groups, and a failure of this optional runtime never takes down a node's other workloads.
+- **Promise only what is verified.** Every guarantee is backed by a check on the path consumers use, and every limit is kept in the cluster, not by NIC staying alive.
 - **Reuse ADR-0021's contract:** `sandbox.require`, `InfraSettings.Sandbox`, `nic validate` and `nic deploy` checks, published pod settings.
 - **Reach more providers than ADR-0022**, in particular Hetzner Cloud, which has no nested virtualisation.
 
@@ -49,7 +47,7 @@ The [evidence summary and detail](../design-doc/implementation/20-workload-sandb
 
 ## Decision Outcome
 
-Chosen option: "Option 3", because it delivers a stronger boundary than ADR-0021 and ADR-0022 with no host relaxation, can reach Hetzner as well as AWS, uses a filter the gVisor project maintains, and confines change to node groups the operator chose. The first delivery favours guarantees NIC can back over convenience: upgrades drain gVisor pods rather than preserving running sessions, and failed nodes stay in service for other workloads rather than retiring themselves.
+Chosen option: "Option 3", because it delivers a stronger boundary than ADR-0021 and ADR-0022 with no host relaxation, reaches Hetzner as well as AWS, uses a filter the gVisor project maintains, and confines change to opted-in groups. The first delivery favours guarantees NIC can back over convenience: upgrades drain gVisor pods, and failed nodes stay in service rather than retiring themselves.
 
 ### The capability
 
@@ -80,24 +78,24 @@ sandbox:
 
 `within:` extends ADR-0021's `sandbox.require`: the inner capability is needed inside the named one, which it implies.
 
-Opting a node group in changes only its boot configuration. It does **not** keep foundational services (Keycloak, its database, ArgoCD) off the group, because NIC does not pin those services; that needs `dedicated: true`. The default is `false` because ADR-0021's threat model is an agent's own commands rather than an adversary escaping the host, and dedication costs capacity; operators who treat agent code as adversarial should set it. Control-plane groups cannot opt in. Opting in, dedicating or opting out an existing group means replacing or draining its nodes.
+Opting in changes only the group's boot configuration. It does **not** keep foundational services (Keycloak, its database, ArgoCD) off the group; that needs `dedicated: true`, which defaults to `false` because ADR-0021's threat model is an agent's own commands rather than a host escape, and dedication costs capacity. Operators who treat agent code as adversarial should set it. Control-plane groups cannot opt in, and changing an existing group's setting means replacing or draining its nodes.
 
 ### What NIC does
 
-1. **`nic validate`** checks the requirement against a support matrix each provider reports in `InfraSettings.Sandbox`: CPU architecture, node OS family, and the **resolved** toolchain versions (container runtime; on Hetzner, the hetzner-k3s binary actually in use and the exact k3s release a short Kubernetes version resolves to). An unqualified or unverifiable toolchain, including a hetzner-k3s binary supplied through `NIC_HETZNER_K3S_PATH` or `PATH` without a qualified version, is an error when the capability is required. Azure is unsupported. Requiring the capability with no group opted in, or on Hetzner before its prerequisites are in NIC, is an error.
-2. **Installation at node boot, on opted-in groups only.** A boot step fetches NIC's published image of the pinned gVisor release and verifies it in stages: the fetched manifest is hashed against NIC's pinned digest before its layer is trusted, the layer against the manifest, and each installed file against a per-file list. Each release installs into its own directory, and a single atomic switch makes it current; the containerd handler `runsc` always runs the current release through that path, so a crash at any point leaves either the old or the new release complete. A failed install never stops a node joining.
-3. **End-to-end check on each node, and routing.** NIC creates a `RuntimeClass` named `gvisor` (handler `runsc`, a fixed `overhead`) whose `scheduling` field selects the opted-in group's label `sandbox.nebari.dev/user-space-kernel: "true"` and, with `dedicated: true`, tolerates the group's taint; the selector never names a release, because Kubernetes copies it into each pod at creation and a release in it would strand pods. After installing, the node runs a test container through containerd, the `runsc` handler and its shim, as a non-root user with the published security settings, and checks gVisor's kernel and ADR-0022's capability test inside it. Using its own credentials, it then records the result: on success a release label; on failure the group label set to `"false"` (nodes may change their own labels but not their taints) and a Kubernetes event. On k3s, which re-applies its command-line labels at every start, the check and label run at every start. Pods sent to a node in the seconds before it relabels itself fail to start; they never run unsandboxed.
-4. **Failed nodes stay in service.** A node whose install fails keeps running its other workloads and is only excluded from gVisor routing. NIC does not retire it automatically: the cluster autoscaler counts a node that registers and reports Ready as a successful scale-up, so no node-side action makes it back off. Repeated failures (for example a registry outage) can therefore make a pending gVisor pod add failed nodes up to the group's maximum, which is the bound; NIC alerts through the event, and operators set modest maximums on opted-in groups. Smarter handling needs a component in the cluster that NIC does not have today.
-5. **`nic deploy` check, mandatory.** When the capability is required, `nic deploy` runs a short-lived smoke pod on each node of each opted-in group, through the published `RuntimeClass` and pod settings, which must report gVisor's kernel and, for `in-pod-namespaces` within `user-space-kernel`, pass ADR-0022's capability test. Any failure fails the deploy; groups at zero nodes are reported as unverified until they scale up. On `existing` and kind clusters, where NIC installed nothing, the same check runs on each eligible node. `status.runtimeHandlers` is not used as evidence, because it lists `runsc` even after a failed install.
-6. **Published pod settings:** `runtimeClassName: gvisor` and `seccompProfile: RuntimeDefault`. gVisor does not apply the pod's profile, so the pod passes Pod Security `restricted` without blocking bubblewrap. These are also the settings for `in-pod-namespaces` within `user-space-kernel`; ADR-0022's "leave `seccompProfile` unset" is only for bubblewrap on the host.
-7. **Upgrades are staged and drain gVisor pods.** A release change is pre-flighted (the image resolves and verifies from inside the cluster), then applied to one canary node and promoted only if the end-to-end check passes there: on AWS a temporary one-node group with the new release, on Hetzner the first node of the in-place rollout. On AWS the rollout then replaces the managed node group's nodes one at a time. On Hetzner, where `hetzner-k3s create` does not replace existing servers, the system-upgrade-controller that hetzner-k3s already installs drains each opted-in node, installs and switches the release, runs the end-to-end check and returns the node to service, one node at a time. A node whose upgrade fails stays on its previous release and is marked so that the rollout skips it, a limit kept in the cluster rather than by NIC. Because nodes are drained, no session keeps an old release once the rollout completes; the boot configuration moves to the new release so new nodes match. `nic deploy` reports nodes not on the pinned release.
-8. **Ownership.** NIC owns the `RuntimeClass`, the upgrade plans, the node services and the release directories (keeping the previous release for rollback). It refuses to adopt an existing `RuntimeClass` named `gvisor` that it did not create, and a failure to create or update any of them fails the deploy rather than being reported as a warning.
+1. **`nic validate`** checks the requirement against a support matrix each provider reports in `InfraSettings.Sandbox`: CPU architecture, node OS family and the **resolved** toolchain (container runtime; on Hetzner, the hetzner-k3s binary actually in use, including one from `NIC_HETZNER_K3S_PATH` or `PATH`, and the exact k3s release). An unqualified or unverifiable toolchain, Azure, no opted-in group, or Hetzner before its prerequisites are in NIC is an error when the capability is required.
+2. **Installation at node boot, on opted-in groups only.** A boot step fetches NIC's published image of the pinned gVisor release, verifies the manifest against a pinned digest and each file against a list, installs it into a per-release directory and makes it current with one atomic switch, so a crash leaves either release complete. A failed install never stops a node joining.
+3. **Node check and routing.** NIC creates a `RuntimeClass` named `gvisor` (handler `runsc`, a fixed `overhead`) whose `scheduling` selects the group label `sandbox.nebari.dev/user-space-kernel: "true"` (and tolerates the taint with `dedicated: true`); it never names a release, because Kubernetes copies the selector into pods and a release would strand them. Each node then runs a test container through containerd's `runsc` handler with the published security settings, checking gVisor's kernel and ADR-0022's capability test, and labels itself: a release label on success; on failure the group label `"false"` and an event. On k3s, which resets command-line labels at each start, this repeats at every start. Pods that reach a node before it relabels fail to start; they never run unsandboxed.
+4. **Failed nodes stay in service** for their other workloads; NIC does not retire them, since the autoscaler counts any Ready node as a successful scale-up. A persistent failure can therefore grow a group to its maximum, which operators keep modest.
+5. **`nic deploy` check, mandatory.** A smoke pod runs on each node of each opted-in group with the published settings and must pass the same checks; any failure fails the deploy, and groups at zero nodes are reported as unverified. On `existing` and kind clusters the check runs on each eligible node. `status.runtimeHandlers` is not evidence: it lists `runsc` after a failed install.
+6. **Published pod settings:** `runtimeClassName: gvisor` and `seccompProfile: RuntimeDefault`. gVisor does not apply the pod's profile, so the pod passes Pod Security `restricted` without blocking bubblewrap. ADR-0022's "leave `seccompProfile` unset" applies only to bubblewrap on the host.
+7. **Staged upgrades that drain gVisor pods.** A release change is pre-flighted, then tried on one canary node (on AWS a temporary one-node group, on Hetzner the rollout's first node) and promoted only if the node check passes. AWS then replaces the group's nodes one at a time; on Hetzner, whose tooling does not replace servers, the system-upgrade-controller hetzner-k3s already installs drains each node, switches the release, checks it and returns it to service. A node whose upgrade fails stays on its previous release and is marked so the rollout skips it, a limit kept in the cluster. `nic deploy` reports nodes not on the pinned release.
+8. **Ownership.** NIC owns the `RuntimeClass`, the upgrade plans, the node services and the release directories (keeping the previous release for rollback), refuses to adopt a `gvisor` `RuntimeClass` it did not create, and fails the deploy if it cannot create or update them.
 
 **Prerequisites.**
 
-- **Supported storage.** gVisor checks file permissions itself, so volumes gVisor pods write to must present real ownership matching the pod's UID or `fsGroup`. FSx for OpenZFS qualifies and EBS is expected to, and whatever storage a provider uses for homes must present real ownership; EFS access points as NIC configures them today do not, and existing homes on them must move under NIC's storage plan ([PR #586](https://github.com/nebari-dev/nebari-infrastructure-core/pull/586)) first. This ADR provides no migration.
+- **Supported storage.** gVisor checks file permissions itself, so volumes its pods write to must present real ownership matching the pod's UID or `fsGroup`. FSx for OpenZFS qualifies and EBS is expected to; EFS access points as NIC configures them do not, and homes on them must move under NIC's storage plan ([PR #586](https://github.com/nebari-dev/nebari-infrastructure-core/pull/586)) first. This ADR provides no migration.
 - **AWS.** Per-node-group bootstrap in NIC's EKS module, and a rollout limited to one node at a time (the module's default allows a third of the group to be unavailable).
-- **Hetzner.** Node-pool labels and pre-k3s boot commands in NIC's generated configuration, home storage that presents real ownership, validation of the resolved toolchain, and the NIC team's fix for the metadata service exposing the k3s join token to pods on autoscaled nodes.
+- **Hetzner.** Node-pool labels and pre-k3s boot commands in NIC's generated configuration, home storage with real ownership, and the NIC team's fix for the metadata service exposing the k3s join token to pods.
 
 ### Combining capabilities
 
@@ -115,43 +113,40 @@ On Hetzner, requiring `in-pod-namespaces` without `within: user-space-kernel` is
 
 ### What a pack does
 
-It applies the published settings for the capabilities it uses, and does not pin gVisor pods to node groups that are not opted in, which would conflict with the `RuntimeClass`'s selector. For bubblewrap inside gVisor it uses ADR-0022's qualified configurations with a fresh `/proc`, checks at startup that the sandbox works, and refuses to run commands unsandboxed if it does not. It does not rely on Landlock inside gVisor, keeps environments and package caches on local or ephemeral storage rather than a network home, and tolerates its gVisor pods being restarted during upgrades.
+It applies the published settings, never pins gVisor pods to groups that are not opted in, and for bubblewrap inside gVisor uses ADR-0022's qualified configurations with a fresh `/proc`, refusing to run commands unsandboxed if its startup check fails. It does not rely on Landlock inside gVisor, keeps environments and package caches off network homes, and tolerates restarts during upgrades.
 
 ### Verification
 
-Before a provider, architecture, node OS family and toolchain are listed, and on every gVisor or k3s upgrade, a maintainer runs the probe with NIC's implementation against the [verification checklist](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-mechanisms-in-full) in the design doc, which includes interrupting an upgrade at each step and killing `nic deploy` mid-rollout.
+Before a provider, architecture, OS family and toolchain are listed, and on every gVisor or k3s upgrade, a maintainer runs the probe with NIC's implementation against the design doc's [verification checklist](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-mechanisms-in-full).
 
 ### Security
 
 - **Stronger than ADR-0021 and ADR-0022, but not a VM.** An escape from gVisor reaches the host and whatever else runs on the node, which without `dedicated: true` can include foundational services. Code an agent executes should be treated as attacker-influenced.
-- **gVisor's own trade-offs.** Its default *directfs* mode opens host files directly for performance (gVisor documents the restrictions it keeps), and its default *systrap* platform, needed without hardware virtualisation, lacks the extra isolation of its KVM platform. NIC pins one gVisor release per NIC release and treats gVisor security releases like its own security fixes.
-- **Supply chain.** NIC publishes the gVisor artifact; nodes verify the manifest against the pinned digest, the layer against the manifest, and each file against its list.
-- **Patch status.** Upgrades drain gVisor pods, so once a rollout completes no session runs an older release; nodes the rollout skipped after a failure, and groups not yet rolled, are reported. On Hetzner the upgrade jobs run privileged on opted-in nodes, through an existing component.
-- **Network.** NetworkPolicy applies to gVisor pods as to others, but because policies are additive, no namespaced policy can guarantee a deny, so this ADR relies on none: on AWS the metadata service is unreachable because NIC's node groups require IMDSv2 with a hop limit of 1, and on Hetzner this capability waits for the NIC team's fix.
-- **Storage endpoints.** gVisor does not stop a pod reaching network storage directly; the sandbox's no-network configuration blocks it for the agent's commands, and for the pod it depends on the NIC team's storage work.
-- **Declared seccomp is not enforced.** Without `--oci-seccomp`, gVisor does not apply the pod's `seccompProfile`, so the published `RuntimeDefault` satisfies policy checks without being enforced; the workload is behind gVisor's own syscall implementation and host-side filter instead. Documentation for hardened mode ([ADR-0010](0010-high-security-mode.md)) and for auditors says so; `--oci-seccomp` would enforce it but block bubblewrap.
+- **gVisor's own trade-offs.** Its default *directfs* mode opens host files directly, and its *systrap* platform, needed without hardware virtualisation, lacks the extra isolation of its KVM platform. NIC pins one gVisor release per NIC release and treats gVisor security releases like its own fixes.
+- **Patch status.** Upgrades drain gVisor pods, so after a rollout no session runs an older release; skipped nodes and unrolled groups are reported. On Hetzner the upgrade jobs run privileged, through an existing component.
+- **Network.** This ADR relies on no NetworkPolicy, since additive policies cannot guarantee a deny: on AWS the metadata service is unreachable (IMDSv2, hop limit 1), and on Hetzner the capability waits for the NIC team's fix. gVisor does not stop a pod reaching network storage; the sandbox's no-network configuration blocks it for the agent's commands, and for the pod it depends on the NIC team's storage work.
+- **Declared seccomp is not enforced.** Without `--oci-seccomp`, gVisor ignores the pod's `seccompProfile`, so `RuntimeDefault` satisfies policy checks without being enforced; gVisor's own syscall implementation and host-side filter apply instead. Documentation for hardened mode ([ADR-0010](0010-high-security-mode.md)) and for auditors says so; `--oci-seccomp` would block bubblewrap.
 
 ### Consequences
 
 **Good:**
-- A much stronger boundary between the pod and the host, maintained upstream, with no host relaxation and no in-cluster installer for installation.
-- Every guarantee is backed by an end-to-end check; upgrades are staged, crash-consistent and limited in the cluster; and a gVisor failure never takes down a node's other workloads.
+- A much stronger, upstream-maintained boundary between pod and host, with no host relaxation and no in-cluster installer.
+- Every guarantee is backed by an end-to-end check, upgrades are staged and crash-consistent, and a gVisor failure never takes down a node's other workloads.
 - Bubblewrap inside gVisor reaches Hetzner and closes ADR-0022's signalling and command-line gaps.
 
 **Bad:**
-- Upgrades restart users' gVisor sessions on both providers; preserving sessions across upgrades is future work.
-- Failed nodes waste capacity until an operator replaces them, and repeated failures can grow an opted-in group to its maximum.
-- File-heavy work on network homes is slower and JupyterLab starts slower; attaching a debugger to an unrelated process does not work; memory headroom under a limit is slightly lower, and how much the `RuntimeClass` overhead compensates is untested.
-- Existing deployments on EFS access points cannot adopt it until their homes move to supported storage.
-- Isolation from foundational services needs `dedicated: true`.
-- Implementation work across NIC and its EKS module (bootstrap, one-at-a-time rollout, canary groups, the artifact, node services, checks, toolchain validation), and continuing work to follow gVisor releases and re-qualify on gVisor, k3s and node-image changes.
+- Upgrades restart users' gVisor sessions.
+- Failed nodes waste capacity until an operator replaces them, and repeated failures can grow a group to its maximum.
+- File-heavy work on network homes and JupyterLab startup are slower, debugging unrelated processes does not work, and memory headroom under a limit is slightly lower (about 16 MiB at 512 MiB).
+- Deployments with homes on EFS access points cannot adopt it until the homes move; isolation from foundational services needs `dedicated: true`.
+- Implementation work across NIC and its EKS module, and continuing work to follow gVisor releases and re-qualify on gVisor, k3s and node-image changes.
 - No GPU qualification (`nvproxy`), no AKS support (it needs `vm-boundary`), and no Landlock inside gVisor.
 
 ## Options Detail
 
 - **Option 1 (do nothing):** no cost, but `in-pod-namespaces` stays AWS-only and unfiltered, and nothing protects the host from the pod.
 - **Option 2 (install everywhere):** no per-group setting, but every node depends on the install succeeding and every upgrade touches nodes running foundational services.
-- **Option 3 (chosen):** confines change to opted-in groups, verifies end to end and upgrades by draining, at the cost of a per-group setting, a node-side check and restarted sessions on upgrade. Variants rejected after review (self-retiring failed nodes, a failure taint, a release-pinned label, session-preserving in-place swaps) and delivery alternatives are recorded in the design doc.
+- **Option 3 (chosen):** confines change to opted-in groups, at the cost of a per-group setting, a node-side check and restarted sessions on upgrade. Rejected variants (self-retiring failed nodes, a failure taint, a release-pinned label, session-preserving swaps) are in the design doc.
 - **Option 4 (privileged DaemonSet installer):** easy to ship, but a privileged component in the cluster that restarts containerd on running nodes and races new nodes joining.
 - **Option 5 (Kata, `vm-boundary`):** a hardware boundary, but it needs nested virtualisation or bare metal (unavailable on Hetzner Cloud) and costs more per pod. The route on AKS, and a later ADR.
 - **Option 6 (a gVisor pod per session):** the strongest design for the threat model, since commands run where the agent's credentials never are, but it costs a pod start per session, workspace sharing and permission for packs to create pods. It can follow this ADR, using its `RuntimeClass`.
@@ -160,8 +155,8 @@ Before a provider, architecture, node OS family and toolchain are listed, and on
 ## Open Questions
 
 - Where does NIC publish the gVisor image, and how do operators with private registries mirror it?
-- Should failed nodes be replaced automatically, and should scale-up stop for a group whose new nodes keep failing? Both need a component in the cluster.
-- Should sessions survive upgrades in a later delivery, given crash-consistent activation and an inventory of which release each running sandbox uses?
+- Should failed nodes be replaced automatically, and scale-up stop for a failing group? Both need a component in the cluster.
+- Should sessions survive upgrades in a later delivery?
 - Should a startup taint close the window before a node records its result?
 - How does the `RuntimeClass` overhead interact with container memory limits under gVisor, and what value should it be?
 - Should GPU (`nvproxy`) and arm64 node groups be qualified?
