@@ -32,9 +32,28 @@ Levels are an acceptance policy: an operator who accepts "at least `mediated-ker
 
 **Profiles.** A profile is a set of guarantees the cluster enforces around a pod and the pod cannot change, composed of atomic guarantees that can each be enforced and checked from outside the workload, such as `no-service-account-token`, `no-secret-references`, `metadata-unreachable` or `default-deny-off-pod-egress`. Profiles are independent of the boundary level and form part of a requirement. NIC makes no blanket "no credentials" or "no network" claim: admission cannot see credentials in images, literal values or data, and "network" must say whether it covers off-pod, loopback and sidecar, own-node and request-layer traffic. Later ADRs define named profiles.
 
-**The published mapping.** NIC publishes, through `nic outputs`, a versioned mapping (`version: 1`) from requirement name to concrete values a pack copies into its pod spec or Agent Sandbox `SandboxTemplate`. Today there is one entry, `default`: its level, an entry-level `state` (`qualified`, `unknown` or `unsupported`, derived from the node groups), the capabilities it offers (`process-self-restriction` only when `qualified`), and the pod-level and container-level security settings (`podSecurityContext`, `containerSecurityContext`) that meet Pod Security `restricted`. Fields later entries need (`runtimeClassName`, `placement`, `workspaceStorageClass`, `profile`, `implementation`) are reserved extension space, not a frozen schema: consumers ignore fields they do not know, and an incompatible change bumps `version`. NIC resolves nothing automatically in this ADR; the operator passes the values to packs as Helm values until pack codegen ([ADR-0003](0003-software-pack-codegen.md)). Packs never look anything up in the cluster: Helm under ArgoCD cannot, and a `SandboxTemplate` needs a literal class name.
+**The published mapping.** To be sandboxed, a pod needs specific settings: today its security context, and later things like which container runtime to use. The right values depend on the cluster, and a pack can't look them up. Under ArgoCD, Helm can't read the cluster, and the runtime has to be named literally. So NIC publishes the values, and the operator passes them to the pack as ordinary Helm values. Once pack codegen exists ([ADR-0003](0003-software-pack-codegen.md)), it can do this step instead of the operator.
 
-Later entries may name `RuntimeClass`es NIC installs (named after the implementation, such as `nebari-gvisor`), provider-managed ones (such as AKS's `kata-vm-isolation`) or an operator's own on `existing` clusters, with storage known to work with them. Labels on runtime classes are inventory metadata; nothing selects a class by label. Any automatic resolution added later must treat zero matches and ambiguity as failures.
+`nic outputs` shows the mapping. It lists named requirements, each with the concrete values a pack copies into its pod spec. A pack that creates sandbox pods through [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) (a Kubernetes SIG project for creating sandbox pods on demand) copies the same values into its `SandboxTemplate`. Today there is one entry, `default`, the cluster's normal runtime:
+
+```yaml
+version: 1
+requirements:
+  default:
+    level: shared-kernel
+    state: qualified          # or unknown / unsupported, derived from the node groups
+    capabilities: [process-self-restriction]   # listed only when qualified
+    podSecurityContext:       # together these meet Pod Security "restricted"
+      runAsNonRoot: true
+      seccompProfile: {type: RuntimeDefault}
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+```
+
+Later entries add fields such as `runtimeClassName`, `placement`, `workspaceStorageClass`, `profile` and `implementation`. These names are reserved now so that adding them breaks nothing. Consumers ignore fields they don't recognise, and an incompatible change bumps `version`.
+
+A later entry might name a `RuntimeClass` that NIC installs (named after the implementation, such as `nebari-gvisor`), a provider-managed one (such as AKS's `kata-vm-isolation`), or the operator's own on an `existing` cluster, together with storage known to work with it. NIC never selects a class automatically in this ADR. Labels on runtime classes are inventory only, and nothing selects a class by label. If automatic selection is added later, finding no match or more than one must be treated as a failure.
 
 **Three states.** Everything NIC reports is one of: (1) a **qualified expectation** for a bounded configuration (provider, image variant, architecture, version range), from the qualification record; (2) a **host-kernel baseline**, inferred from a node's kernel version; or (3) **enforcement**, which only the consumer establishes, when it creates each sandbox. "Unknown" stays unknown; a version comparison never turns it into "supported". Reports concern only the default runtime's host environment: gVisor has no Landlock, and a Kata guest has its own kernel.
 
