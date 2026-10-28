@@ -34,9 +34,9 @@ Levels are an acceptance policy: an operator who accepts "at least `mediated-ker
 
 **Profiles.** A profile is a set of guarantees the cluster enforces around a pod and the pod cannot change, composed of atomic guarantees that can each be enforced and checked from outside the workload, such as `no-service-account-token`, `no-secret-references`, `metadata-unreachable` or `default-deny-off-pod-egress`. Profiles are independent of the boundary level and form part of a requirement. NIC makes no blanket "no credentials" or "no network" claim: admission cannot see credentials in images, literal values or data, and "network" must say whether it covers off-pod, loopback and sidecar, own-node and request-layer traffic. Later ADRs define named profiles.
 
-**The published mapping.** To be sandboxed, a pod needs specific settings: today its security context, and later things like which container runtime to use. The right values depend on the cluster, and a pack can't look them up. Under ArgoCD, Helm can't read the cluster, and the runtime has to be named literally. So NIC publishes the values, and the operator passes them to the pack as ordinary Helm values. Once pack codegen exists ([ADR-0003](0003-software-pack-codegen.md)), it can do this step instead of the operator.
+**The published mapping.** To be sandboxed, a pod needs specific settings: today its security context, and later things like which container runtime to use and which nodes to run on. Some of these will differ between clusters, and a pack can't look them up itself: under ArgoCD, Helm can't read the cluster, and a runtime has to be named literally. So NIC publishes them, and they reach the pack as ordinary Helm values, like the domain or storage class.
 
-`nic outputs` shows the mapping. The operator reads it, not the pack: they check `state` and `capabilities` to decide whether to turn on a pack's sandboxed features on this cluster, then copy the values into that pack's Helm values when installing it, and recheck after node images or Kubernetes versions change. The pack only ever sees the values it is given. It lists named requirements, each with the concrete values a pack copies into its pod spec. A pack that creates sandbox pods through [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) (a Kubernetes SIG project for creating sandbox pods on demand) copies the same values into its `SandboxTemplate`. Today there is one entry, `default`, the cluster's normal runtime:
+NIC shows the mapping in `nic outputs`. It lists named requirements, each with concrete values for a pod spec. A pack that creates sandbox pods through [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) (a Kubernetes SIG project for creating sandbox pods on demand) puts the same values in its `SandboxTemplate` instead. Today there is one entry, `default`, the cluster's normal runtime:
 
 ```yaml
 version: 1
@@ -52,6 +52,8 @@ requirements:
       allowPrivilegeEscalation: false
       capabilities: {drop: [ALL]}
 ```
+
+**How values reach a pack.** Today's `default` security settings are the same on every cluster, so a pack author ships them as chart defaults and nobody copies anything. The only part that varies by cluster today is `state`. The operator, who reads `nic outputs`, uses it to decide whether to turn on a pack's sandboxed features. The pack's startup check still refuses sandboxed work on any node that can't enforce it. Once entries carry values that do vary by cluster, such as a `runtimeClassName` or `placement`, the operator sets them when installing a pack, as they already do for the domain and storage class. With pack codegen ([ADR-0003](0003-software-pack-codegen.md)), NIC would fill them in automatically for packs whose `values.yaml` has a `sandbox` key, the same convention ADR-0003 proposes for `sharedStorage.storageClass`.
 
 Later entries add fields such as `runtimeClassName`, `placement`, `workspaceStorageClass`, `profile` and `implementation`. These names are reserved now so that adding them breaks nothing. Consumers ignore fields they don't recognise, and an incompatible change bumps `version`.
 
