@@ -66,10 +66,10 @@ Detailed implementation specifications and technical designs.
     Sandbox capabilities for software packs: spectrum, provider findings, delivery, verification and security (design behind ADR-0021, and detail for the exploratory ADRs built on it)
 
 21. **[Immutable Node-Pool Rollouts](implementation/21-node-pool-rollouts.md)**
-    Blue/green replacement of node pools whose running nodes must never change: stored specs, phases, provider primitives (design behind ADR-0024)
+    Blue/green replacement of node pools whose running nodes must never change: stored specs, phases, provider primitives (design behind the exploratory ADR-0024)
 
 22. **[Untrusted-Execution Pods](implementation/22-untrusted-execution-pods.md)**
-    Namespace profile for pods that run agents' tool calls: enforced default-deny networking, admission rules, sandbox runtimes, deploy probe (design behind ADR-0025)
+    Namespace profile for pods that run agents' tool calls: enforced default-deny networking, admission rules, a minimum boundary level, deploy probe, consumer guide for coding agents (design behind the exploratory ADR-0025)
 
 ### Operations
 
