@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021, which defines the capability contract and reserves the name `in-pod-namespaces`. This sketch would also add requirement sets and a published requirement mapping to that contract, which ADR-0021 itself does not adopt ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#proposed-additions-requirement-sets-and-a-requirement-mapping)). Revised 2026-10-17: an unfiltered first implementation on AWS, with a NIC-owned seccomp profile as fallback. Revised 2026-10-28 after review: defines the capability, its qualified configurations and its capability test, with **no supported delivery route yet**; the unfiltered AL2023 result is recorded as evidence, not a product setting; bubblewrap inside gVisor is the intended first route; the NIC-owned profile is deferred. Detailed design and evidence are in the design doc [Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md), §20.5 and §20.9–§20.11.
+Proposed (DRAFT, exploratory; expected fifth in order, after gVisor): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021, which defines the capability contract and reserves the name `in-pod-namespaces`. This sketch would add entries to ADR-0021's published mapping ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#proposed-additions-more-mapping-entries-sketches)). Revised 2026-10-17: an unfiltered first implementation on AWS, with a NIC-owned seccomp profile as fallback. Revised 2026-10-28 after review: defines the capability, its qualified configurations and its capability test, with **no supported delivery route yet**; the unfiltered AL2023 result is recorded as evidence, not a product setting; bubblewrap inside gVisor is the intended first route; the NIC-owned profile is deferred. Detailed design and evidence are in the design doc [Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md), §20.5 and §20.9–§20.11.
 
 ## Date
 
@@ -10,7 +10,7 @@ Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gr
 
 ## Context
 
-The motivating use case for workload sandboxing is a pack that confines the shell commands an agent runs, for example with [bubblewrap](https://github.com/containers/bubblewrap): each command sees a narrowed filesystem, no network and none of the pod's credentials. ADR-0021 delivers `process-self-restriction` (Landlock and seccomp), which covers filesystem and TCP-port confinement but not a separate filesystem view or a separate network stack. Those need Linux namespaces, which bubblewrap, nsjail, headless Chromium's sandbox and similar tools create inside the pod.
+The motivating use case for workload sandboxing is a pack that confines the shell commands an agent runs, for example with [bubblewrap](https://github.com/containers/bubblewrap): each command sees a narrowed filesystem, no network and none of the pod's credentials. ADR-0021 describes `process-self-restriction` (Landlock), which covers filesystem and TCP-port confinement but not a separate filesystem view or a separate network stack. Those need Linux namespaces, which bubblewrap, nsjail, headless Chromium's sandbox and similar tools create inside the pod.
 
 Most packs have another way to get them: run tool calls in a separate, credential-free sandbox pod, which needs no namespaces inside any pod. This capability matters mainly for **packs that cannot split tool execution into a separate pod**, such as an extension running inside a user's notebook server.
 
@@ -56,7 +56,7 @@ Chosen option: "Option 8", with Option 5 as the intended first route. The capabi
 
 ### The capability
 
-**`in-pod-namespaces`:** a non-root process with no added capabilities, in a container that applies the execution settings NIC publishes for a requirement set that names this capability, can create a user namespace that maps **only its own UID and GID**, and mount, network, IPC and UTS namespaces inside it. The container's masked `/proc` is retained (bind-mounted, not freshly mounted), so no pid namespace with a fresh procfs is guaranteed.
+**`in-pod-namespaces`:** a non-root process with no added capabilities, in a container that applies the values of a mapping entry that names this capability, can create a user namespace that maps **only its own UID and GID**, and mount, network, IPC and UTS namespaces inside it. The container's masked `/proc` is retained (bind-mounted, not freshly mounted), so no pid namespace with a fresh procfs is guaranteed.
 
 The guarantee names the published settings rather than a mechanism, so the delivery route can change without packs changing.
 
@@ -69,14 +69,14 @@ The exact commands are in [§20.9](../design-doc/implementation/20-workload-sand
 
 ### Delivery routes
 
-- **None is supported yet.** A requirement set that names `in-pod-namespaces` fails `nic validate` with "no qualified implementation provides in-pod-namespaces" until an implementation that has the capability as a property is built.
-- **Intended first route: bubblewrap inside gVisor.** Once an implementation of `mediated-kernel` with gVisor exists (sketched in [ADR-0023](0023-user-space-kernel-capability.md)), a set `{boundary: mediated-kernel, capabilities: [in-pod-namespaces]}` resolves to it, and packs apply its published settings and the qualified configurations. Probed on a local VM, EKS (AL2023 x86 and arm64) and Hetzner (Ubuntu 24.04): the qualified configurations worked and hid canaries, the agent's socket, the network and the metadata address, and a fresh `/proc` hid other processes.
+- **None is supported yet.** A mapping entry that names `in-pod-namespaces` fails to resolve, with "no qualified implementation provides in-pod-namespaces" until an implementation that has the capability as a property is built.
+- **Intended first route: bubblewrap inside gVisor.** Once an implementation of `mediated-kernel` with gVisor exists (sketched in [ADR-0023](0023-user-space-kernel-capability.md)), a mapping entry `{level: mediated-kernel, capabilities: [in-pod-namespaces]}` resolves to it, and packs apply its values and the qualified configurations. Probed on a local VM, EKS (AL2023 x86 and arm64) and Hetzner (Ubuntu 24.04): the qualified configurations worked and hid canaries, the agent's socket, the network and the metadata address, and a fresh `/proc` hid other processes.
 - **At `shared-kernel`: no route.** The AL2023 result (bubblewrap works when `seccompProfile` is unset and `seccompDefault` is off) is recorded as an observation ([§20.9](../design-doc/implementation/20-workload-sandboxing.md#adr-0022-evidence-bubblewrap-on-the-host-kernel-without-a-filter)). NIC does not publish, check or support it; a pack that relies on it does so outside NIC's contract.
 - **Deferred: the filtered NIC-owned profile (Option 4).** Kept in §20.9 for reference and reconsidered only if a pack needs the capability where gVisor cannot run.
 
 ### What a pack does
 
-It declares a requirement set naming the capability (by hand until [ADR-0003](0003-software-pack-codegen.md)), applies that set's published settings from NIC's requirement mapping without hardcoding a runtime name, starts from a qualified configuration, checks at startup that it can create the namespaces, and refuses to run commands unsandboxed if it cannot.
+It uses a mapping entry naming the capability, with the entry's values copied into its Helm values (by hand until [ADR-0003](0003-software-pack-codegen.md)) and no runtime name hardcoded, starts from a qualified configuration, checks at startup that it can create the namespaces, and refuses to run commands unsandboxed if it cannot.
 
 ### Trust model
 
@@ -123,7 +123,7 @@ Full assessments are in [§20.9](../design-doc/implementation/20-workload-sandbo
 
 ## Open Questions
 
-- Does ADR-0021's `process-self-restriction` cover the need for most packs? A nested seccomp filter denying non-Unix sockets, with Landlock ABI 6's signal and abstract-socket scoping, could give "no network except a Unix socket to a proxy" under Pod Security `restricted`; ABI 6 is available on AL2023 (6.12) but not on Hetzner's Ubuntu 24.04 (ABI 4), and the combination has not been probed.
+- Does ADR-0021's `process-self-restriction` cover the need for most packs? A nested seccomp filter denying non-Unix sockets, with Landlock ABI 6's signal and abstract-socket scoping, could give "no network except a Unix socket to a proxy" under Pod Security `restricted`; ABI 6 is available on AL2023 (6.12) but not on Hetzner's Ubuntu 24.04 (ABI 4), and ADR-0021's reference consumer (§20.8) tests the combination at ABI 4 and 6 on Ubuntu VMs, not yet on provider nodes.
 - Which packs cannot split tool execution into a separate pod, and do they need a separate filesystem view?
 - If a host-kernel route is ever needed: a NIC-written profile, Podman's profile pinned, pack-supplied profiles through the Security Profiles Operator, or `pod-user-namespaces`?
 - Should the capability ever cover pods running sandboxes for several users or sessions? Single-ID user namespaces map every session to the pod's own UID.

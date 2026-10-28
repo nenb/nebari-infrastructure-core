@@ -2,9 +2,9 @@
 
 ## 20.1 Scope
 
-This document holds the implementation design behind [ADR-0021: Workload Sandboxing Capability Contract for Software Packs](../../adr/0021-gradual-workload-sandboxing-for-software-packs.md). The ADR records the decision: a tool-neutral contract on three axes (boundary level, in-pod capability, profile) with rules for later additions, delivering `process-self-restriction` behind a per-node-group kernel floor that `nic validate` and `nic deploy` check. This document records the detail that implements and justifies it: the sandboxing spectrum, provider findings, the full contract, delivery, evidence from probes of the higher levels, verification, security considerations and related work. Where the two disagree, the ADR is authoritative for the decision and this document is updated to match.
+This document holds the implementation design behind [ADR-0021: Workload Sandboxing Capability Contract for Software Packs](../../adr/0021-gradual-workload-sandboxing-for-software-packs.md). The ADR records the decision: a tool-neutral contract on three axes (boundary level, in-pod capability, profile), a published mapping of concrete values packs copy, and rules for later additions, delivering a qualified description of `process-self-restriction` (Landlock on the default runtime) with a read-only diagnostic report. This document records the detail that implements and justifies it: the sandboxing spectrum, provider findings, the full contract, delivery, evidence from probes of the higher levels, verification, security considerations and related work. Where the two disagree, the ADR is authoritative for the decision and this document is updated to match.
 
-It also holds detail for the exploratory ADRs built on that contract (ADR-0022 onwards). They are sketches, not decisions, and propose additions to ADR-0021's contract that it does not adopt; the sections that belong to them (§20.9, §20.12, §20.14, §20.15, "Proposed additions: requirement sets and a requirement mapping" in §20.6, and subsections named after an ADR) say so.
+It also holds detail for the exploratory ADRs built on that contract (ADR-0022 onwards). They are sketches, not decisions, and propose entries for ADR-0021's published mapping and other additions it does not adopt; the sections that belong to them (§20.9, §20.12, §20.14, §20.15, "Proposed additions: more mapping entries (sketches)" in §20.6, and subsections named after an ADR) say so.
 
 ## 20.2 The sandboxing spectrum
 
@@ -12,7 +12,7 @@ It also holds detail for the exploratory ADRs built on that contract (ADR-0022 o
 |---|---|---|---|---|---|---|
 | 1 | Language runtime | WASM (wasmtime, WASI), V8 isolates, Deno with permission flags, Pyodide, Monty (a Python-subset interpreter written in Rust, with no filesystem, environment or network inside the sandbox; the host exposes only the functions it chooses) | The runtime: code can only do what the runtime exposes | None | Runs only code built for that runtime, or a subset of a language (no C extensions or third-party native packages); no arbitrary binaries, shells, `pip install` or `git` | Packs can do this today |
 | 1b | The user's own browser | JupyterLite, Pyodide or WebContainers on the client side | The browser sandbox, on the user's machine | None; the cluster is not involved | As row 1; nothing runs on the platform | Packs can do this today |
-| 2 | Process self-restriction | Landlock plus seccomp filters, including seccomp user notification to mediate selected syscalls (the approach of several agent sandboxes on Linux) | The process drops its own filesystem (and, on newer kernels, TCP) rights and installs syscall filters before running a command | Node kernel only: Landlock ABI >= 3 enabled (ABI 4 for TCP rules); nothing else. Not every provider's default node image qualifies (see §20.4) | Covers filesystem access and syscall mediation; Landlock TCP rules need a newer kernel than filesystem rules; no process-visibility isolation on its own | **`process-self-restriction`, this ADR** |
+| 2 | Process self-restriction | Landlock, optionally with seccomp filters, including seccomp user notification to mediate selected syscalls (the approach of several agent sandboxes on Linux) | The process drops its own filesystem (and, on newer kernels, TCP) rights and installs syscall filters before running a command | Node kernel only: Landlock ABI >= 3 enabled (ABI 4 for TCP rules); nothing else. Not every provider's default node image qualifies (see §20.4) | Covers filesystem access; Landlock TCP rules need a newer kernel than filesystem rules; no process-visibility isolation on its own | **`process-self-restriction` (Landlock), described by this ADR**; `seccomp-user-notification` reserved |
 | 3 | Namespace sandbox in the pod | bubblewrap, nsjail, minijail, rootless podman/buildah | Linux namespaces inside the pod, on the shared host kernel | Yes: node prep and security profiles (the four layers below) | Shares the host kernel; extra kernel attack surface from user namespaces | `in-pod-namespaces`, reserved for a later ADR |
 | 3b | Headless browser in the pod | Chromium/Playwright running untrusted pages or scripts | Chromium's own sandbox, which also uses user namespaces | Same as row 3, otherwise it runs with `--no-sandbox` | As row 3 | Potential consumer of `in-pod-namespaces`; not qualified (Chromium's sandbox may need more than the guarantee, such as its own pid namespace) |
 | 3c | System-container runtime | Sysbox, used to run `dockerd` or `systemd` inside a workspace | User namespaces plus virtualised `/proc` and `/sys`, on the shared host kernel | Yes: either a `RuntimeClass` installed on the nodes, or a privileged outer container that hosts an unprivileged inner one | Shares the host kernel; the privileged-outer-container variant is root on the node | Not delivered here. As a `RuntimeClass`, a possible later implementation; the privileged-outer-container variant is root on the node and would need its own trust model |
@@ -41,19 +41,19 @@ These points follow from the spectrum table in §20.2.
 Row 2 needs nothing from the pod spec: it runs non-root, with every capability dropped and the runtime's default seccomp profile, so it is compatible with Pod Security `restricted`. What it needs is node kernel support, which packs cannot change:
 
 - **Landlock** enabled in the kernel's active security modules, at a sufficient ABI version. ABI 3 (Linux 6.2) covers filesystem access including truncation; TCP bind/connect rules need ABI 4 (Linux 6.7). ABI 3 is the floor for the capability, but **ABI 4 is the target**: TCP-port confinement (restricting which ports a process may `bind` or `connect` to) is the main agent use case, and it needs ABI 4. Landlock checks ports, not destination addresses, and does not restrict UDP, so port confinement is not by itself proxy enforcement (§20.3). Distribution backports exist, so the version number alone does not decide it: the probe does.
-- **Nested seccomp filters with user notification**, including the operations that let a supervising process inject descriptors into the workload, usable under the runtime's default seccomp profile. containerd's default profile allows the `seccomp` syscall, and, on kernels from 4.8, `ptrace` and `process_vm_readv`, which some mediators use to inspect the workload.
+- For the separate, reserved `seccomp-user-notification` capability: **nested seccomp filters with user notification**, including the operations that let a supervising process inject descriptors into the workload, usable under the runtime's default seccomp profile. containerd's default profile allows the `seccomp` syscall, and, on kernels from 4.8, `ptrace` and `process_vm_readv`, which some mediators use to inspect the workload. Because a runtime's default profile can change independently of the kernel, this is probed and reported separately.
 
-Where the providers' default node images stand, from AMI release notes and module source (checked 2026-10-14). Whether Landlock is in each kernel's active security-module list at boot (`/sys/kernel/security/lsm`) has been observed on Ubuntu 24.04's 6.8 kernel in a local probe (2026-10-17: `lockdown,capability,landlock,yama,apparmor`, ABI 4) and on an EKS 1.34 AL2023 node (2026-10-19: `lockdown,capability,landlock,yama,safesetid,selinux,bpf,ima`, ABI 6, where the full `process-self-restriction` probe passed under both `RuntimeDefault` and no profile); and on Hetzner nodes deployed with NIC (2026-10-25: kernel 6.8.0-138, `lockdown,capability,landlock,yama,apparmor`, ABI 4, full probe passed); it is still to be confirmed on AKS nodes:
+Where the providers' default node images stand, from AMI release notes and module source (checked 2026-10-14). Whether Landlock is in each kernel's active security-module list at boot (`/sys/kernel/security/lsm`) has been observed on Ubuntu 24.04's 6.8 kernel in a local probe (2026-10-17: `lockdown,capability,landlock,yama,apparmor`, ABI 4) and on an EKS 1.34 `AL2023_x86_64_STANDARD` node, x86_64 (2026-10-19: `lockdown,capability,landlock,yama,safesetid,selinux,bpf,ima`, ABI 6, where the full probe passed under both `RuntimeDefault` and no profile); and on Hetzner Ubuntu 24.04 nodes, x86_64, deployed with NIC (2026-10-25: kernel 6.8.0-138, `lockdown,capability,landlock,yama,apparmor`, ABI 4, full probe passed). It is still to be confirmed on AKS nodes and on every arm64 image:
 
 | Provider | Default node kernel | Landlock ABI >= 3 |
 |---|---|---|
-| `aws` (AL2023 EKS AMI) | Set by Kubernetes version (amazon-eks-ami v20261012): 6.1 for 1.31–1.32, 6.12 for 1.33–1.35, 6.18 for 1.36–1.37. NIC's AWS example (1.34) gets 6.12 | Yes from Kubernetes 1.33 (6.12 provides ABI 6). AL2023 enabled `CONFIG_SECURITY_LANDLOCK` in its 6.1 and 6.12 kernels in release 2023.8.20250804; observed active at boot on kernel 6.12.111 (AMI release 2023.12.20261012) |
-| `hetzner` (hetzner-k3s, Ubuntu 24.04) | 6.8 | Yes (ABI 4); observed active at boot on Hetzner nodes (6.8.0-138), full probe passed |
-| `azure` (AKS) | NIC's AKS module (v0.2.0) sets no `os_sku`, so AKS defaults apply: Ubuntu 22.04 (5.15) below Kubernetes 1.35, and Ubuntu 24.04 (6.8) from 1.35, to which AKS migrates node pools automatically on upgrade. NIC's Azure example (1.34) gets 22.04 | No below 1.35. From 1.35 expected ABI 4, but **not yet probed**: until a maintainer runs the probe on AKS, the Azure provider reports the floor as unknown and only `nic deploy`'s kernel check judges AKS nodes. Selecting Ubuntu 24.04 earlier (`Ubuntu2404`, available from 1.32) or Azure Linux 3 needs an `os_sku` setting the module does not expose today |
+| `aws` (AL2023 EKS AMI) | Set by Kubernetes version (amazon-eks-ami v20261012): 6.1 for 1.31–1.32, 6.12 for 1.33–1.35, 6.18 for 1.36–1.37. NIC's AWS example (1.34) gets 6.12 | Qualified for `AL2023_x86_64_STANDARD` on x86_64 with the 6.12 kernel (Kubernetes 1.33–1.35, ABI 6): observed active at boot on kernel 6.12.111 (AMI release 2023.12.20261012). AL2023 enabled `CONFIG_SECURITY_LANDLOCK` in its 6.1 and 6.12 kernels in release 2023.8.20250804. Unsupported on 6.1 (ABI 2). Unknown for 6.18, arm64, NVIDIA and Bottlerocket AMIs until probed |
+| `hetzner` (hetzner-k3s, Ubuntu 24.04) | 6.8 | Qualified on x86_64 (ABI 4); observed active at boot on Hetzner nodes (6.8.0-138), full probe passed |
+| `azure` (AKS) | NIC's AKS module (v0.2.0) sets no `os_sku`, so AKS defaults apply: Ubuntu 22.04 (5.15) below Kubernetes 1.35, and Ubuntu 24.04 (6.8) from 1.35, to which AKS migrates node pools automatically on upgrade. NIC's Azure example (1.34) gets 22.04 | Unsupported below 1.35. From 1.35 expected ABI 4, but **not yet probed**: until a maintainer runs the probe on AKS, the Azure provider reports the expectation as unknown. Selecting Ubuntu 24.04 earlier (`Ubuntu2404`, available from 1.32) or Azure Linux 3 needs an `os_sku` setting the module does not expose today |
 | `local` (kind) | The host's kernel | Host-dependent |
 | `existing` | Unknown | Detect only |
 
-So nearly every default image on a supported Kubernetes version qualifies, and the NIC work for row 2 is promising a kernel floor per node group, backing it with a probe run on each node image family, and checking it in `nic validate` and `nic deploy`, not changing pod security or labelling nodes.
+So the default x86_64 images on recent Kubernetes versions qualify where they have been probed, older kernel lines do not, and much else is unknown. The NIC work for row 2 is recording qualified configurations, reporting the expectation per node group with a diagnostic baseline, and probing each configuration before recording it, not changing pod security or labelling nodes.
 
 ## 20.5 Why row 3 (in-pod namespaces) needs NIC
 
@@ -79,20 +79,30 @@ Where the providers stand on these layers. Entries marked *(unverified)* are inf
 Layer 2 is the same on every provider, so most of the work is provider-neutral; only layer 1 (and layer 3 on AppArmor nodes) needs provider-specific changes.
 
 
-**Why it can appear to work today.** No pack in `PACKS/` sets a seccomp profile, and neither does the bundled JupyterHub chart. A pod with no seccomp profile gets the kubelet's default, which is no filter at all (`Unconfined`) unless the kubelet's `seccompDefault` option is enabled. On AWS this is confirmed from source: the AL2023 kubelet configuration generated by nodeadm ([`amazon-eks-ami`](https://github.com/awslabs/amazon-eks-ami), `nodeadm/internal/kubelet/config.go`) does not set `seccompDefault`, containerd's `unset_seccomp_profile` is empty, and NIC's [`terraform-aws-eks-cluster`](https://github.com/nebari-dev/terraform-aws-eks-cluster) module (v0.7.0) adds no kubelet configuration. So on AWS, where layer 1 also passes, a user pod runs bubblewrap today in its reuse-`/proc` mode (observed on EKS 1.34, 2026-10-19; §20.9). This is not a foundation packs can rely on: it depends on running with no syscall filter, it stops working as soon as a pack follows Pod Security Standards `restricted` (which requires `RuntimeDefault` or `Localhost`) or the kubelet's `seccompDefault` is enabled, and ADR-0010's hardened mode is expected to forbid it. The same default holds on the other providers (checked from source and docs): hetzner-k3s passes only `cloud-provider` and `resolv-conf` kubelet arguments, NIC adds none, and k3s does not enable `seccompDefault`; on AKS the default is `Unconfined`, `RuntimeDefault` is available only through a custom kubelet configuration (behind the `KubeletDefaultSeccompProfilePreview` feature flag at the time of writing), and NIC's AKS module sets no kubelet configuration.
+**Why it can appear to work today.** None of the packs surveyed sets a seccomp profile, and neither does the bundled JupyterHub chart. A pod with no seccomp profile gets the kubelet's default, which is no filter at all (`Unconfined`) unless the kubelet's `seccompDefault` option is enabled. On AWS this is confirmed from source: the AL2023 kubelet configuration generated by nodeadm ([`amazon-eks-ami`](https://github.com/awslabs/amazon-eks-ami), `nodeadm/internal/kubelet/config.go`) does not set `seccompDefault`, containerd's `unset_seccomp_profile` is empty, and NIC's [`terraform-aws-eks-cluster`](https://github.com/nebari-dev/terraform-aws-eks-cluster) module (v0.7.0) adds no kubelet configuration. So on AWS a user pod can run bubblewrap today in its reuse-`/proc` mode: observed on an EKS 1.34 AL2023 x86_64 node with `seccompProfile` unset (2026-10-19, §20.6), and refused under `RuntimeDefault`. This is not a foundation packs can rely on: it depends on running with no syscall filter, it stops working as soon as a pack follows Pod Security Standards `restricted` (which requires `RuntimeDefault` or `Localhost`) or the kubelet's `seccompDefault` is enabled, and ADR-0010's hardened mode is expected to forbid it. The same default holds on the other providers (checked from source and docs): hetzner-k3s passes only `cloud-provider` and `resolv-conf` kubelet arguments, NIC adds none, and k3s does not enable `seccompDefault`; on AKS the default is `Unconfined`, `RuntimeDefault` is available only through a custom kubelet configuration (behind the `KubeletDefaultSeccompProfilePreview` feature flag at the time of writing), and NIC's AKS module sets no kubelet configuration.
 
 ## 20.6 The capability contract in full
 
-In short, the contract is an interface to the **node execution environment**: NIC promises, by name and with verification, what the nodes' kernel, kubelet configuration, container runtime and security profiles will let a pod do. Packs still write their own pod settings and run their own sandboxing tools; networking (NetworkPolicy enforcement) and higher-level sandbox systems that build on these capabilities are outside it.
+In short, the contract is an interface to the **node execution environment**: NIC describes, by name and with qualification, what the nodes' kernel, kubelet configuration, container runtime and security profiles let a pod do, and publishes the concrete values a pack uses. Packs still write their own pod settings and run their own sandboxing tools; networking (NetworkPolicy enforcement) and higher-level sandbox systems that build on these capabilities are outside it.
 
-ADR-0021 states the contract on three independent axes: an ordered **boundary level** between pod and host, **in-pod capabilities** the workload uses inside its pod, and **profiles** of platform guarantees around the pod. In-pod capabilities are not ordered against levels (a VM is not a superset of in-pod namespaces), which is why they are a separate axis. All of them name **guarantees, not mechanisms**; how levels, implementations and properties fit together is in "Boundary levels, properties and the ordering rule" below.
+ADR-0021 states the contract on three independent axes: an ordered **boundary level** between pod and host, **in-pod capabilities** the workload uses inside its pod, and **profiles** of guarantees enforced around the pod. In-pod capabilities are not ordered against levels (a VM is not a superset of in-pod namespaces), which is why they are a separate axis. All of them name **guarantees, not mechanisms**.
 
 | Capability | Guarantee | Qualified consumer | Status |
 |---|---|---|---|
-| `process-self-restriction` | A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict itself and its descendants with Landlock (ABI 3 or newer; the observed ABI is reported) and with nested seccomp filters, including user-notification filters. User notification is a mechanism for emulating syscalls or injecting descriptors, not a security-policy check on its own: a supervisor that inspects a syscall's arguments and then lets it continue can race with changes to that memory or filesystem state, as the Linux manual warns. | A Landlock ruleset that denies a filesystem write and, at ABI 4, restricts `connect` to one port; a nested seccomp user-notification filter | **Delivered (ADR-0021)** |
+| `process-self-restriction` | A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict itself and its descendants with Landlock (ABI 3 or newer; the ABI is part of each qualification). | The reference consumer (§20.8): one combined filesystem and TCP ruleset, then `execve` of a command | **Described (ADR-0021)**: qualified per configuration; enforcement is the consumer's |
+| `seccomp-user-notification` | The same process can install nested seccomp filters with user notification, including `SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SEND`. User notification is a mechanism for emulating syscalls or injecting descriptors, not a policy check: a supervisor that inspects arguments and then lets the call continue can race with changes to that memory, as the Linux manual warns. | The probe's notification path (two stacked filters, listener transfer, descriptor injection) | Reserved. Probed separately because a container runtime or default-profile change can break it independently of the kernel |
 | `in-pod-namespaces` | A non-root process with no added capabilities, applying the published settings, can create a user namespace that maps **only its own UID and GID**, and mount, network, IPC and UTS namespaces inside it. The container's masked `/proc` is retained (bind-mounted, not freshly mounted), so no pid namespace with a fresh procfs is guaranteed. | One pinned bubblewrap version: a capability test and two qualified configurations (§20.9) | Sketched in [ADR-0022](../../adr/0022-in-pod-namespaces-capability.md); no supported route yet |
 
-NetworkPolicy enforcement, which a profile such as "no network" would build on, is tracked in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) rather than named here. Profiles themselves are reserved; none is named yet.
+**Profiles.** A profile is a composition of **atomic guarantees**, each of which the cluster enforces around a pod and can check from outside it, for example:
+
+| Atomic guarantee | Enforced by | What it does not cover |
+|---|---|---|
+| `no-service-account-token` | Admission: `automountServiceAccountToken: false` and no projected token volume | Tokens copied into images, files or environment values |
+| `no-secret-references` | Admission: no `secretKeyRef`, `secretRef` or Secret volumes | Literal values in the pod spec, ConfigMaps, images, data |
+| `metadata-unreachable` | Network policy and node settings (for example IMDS hop limit 1) | Other in-cluster credential services |
+| `default-deny-off-pod-egress` | Enforced NetworkPolicy | Loopback and sidecars in the pod; traffic to the pod's own node, which the tested policies did not block; policies a request layer creates |
+
+A blanket "no credentials" or "no network" claim is not made: admission cannot see credentials in images, literal environment values, ConfigMaps or data, and network guarantees must say which of off-pod, loopback and sidecars, own-node and request-layer traffic they cover. Profiles are independent of the boundary level and are reserved; NetworkPolicy enforcement, which several of them need, is tracked in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691).
 
 Every capability, implementation and profile is defined by the same items: **guarantee**, **qualified consumer**, **placement**, **cluster requirements** (node kernel or OS, boot-time node settings, Kubernetes or API-server features, all expressed through provider config), **provisioning** (what is installed, by whom, and when in the lifecycle), **verification**, any **scale limits**, and a **trust model**:
 
@@ -102,21 +112,13 @@ Every capability, implementation and profile is defined by the same items: **gua
 - what the pack must enforce itself;
 - what is outside the guarantee.
 
-Two distinctions apply to every trust model. **Declared settings are not enforcement:** a pod's `seccompProfile` is ignored by gVisor (without `--oci-seccomp`) and by Kata in the tested configuration, so a setting that satisfies Pod Security may confine nothing. **Smoke tests are not attestation:** a check pod that passes shows the path worked for that pod at that time; it does not prove what runs on a node, and a compromised node can pass it.
+Two distinctions apply to every trust model. **Declared settings are not enforcement:** the tested gVisor configuration (without `--oci-seccomp`) and the tested Kata configuration ignored the pod's `seccompProfile`, so a setting that satisfies Pod Security may confine nothing. **Smoke tests are not attestation:** a check pod that passes shows the path worked for that pod at that time; it does not prove what runs on a node, and a compromised node can pass it.
 
-**Changing a capability's meaning.** A name's guarantee never changes silently. Tightening or loosening it needs a new or versioned name (`<name>-v2`), published alongside the old one, which keeps its meaning until retired; new evidence and newly qualified providers keep the name.
+Tools that need more than the qualified configuration are **potential** consumers, not implied ones. Rootless container engines are the main example: normal multi-UID operation uses `newuidmap`/`newgidmap` and subordinate ID ranges, which a non-root pod with `allowPrivilegeEscalation: false` and no capabilities cannot use, and they may also need FUSE, storage drivers or cgroup delegation.
 
-**Placement labels.** Labels that route pods are never writable by nodes. They use the `node-restriction.kubernetes.io/` prefix, which the NodeRestriction admission plugin stops kubelets setting or changing, including through `--node-labels` at registration (a kubelet given such a label refuses to start), so NIC or a cluster-side component applies them through the API after it has established that the node belongs where the label says. A node may set labels under `sandbox.nebari.dev/` about itself, but only to signal failure (for example `sandbox.nebari.dev/gvisor: failed`); nothing routes pods towards such a label. Without this rule, a compromised node, or a rogue one registered with a leaked join token, could label itself and attract every sandboxed pod. One consequence for later capabilities: autoscaler templates for scale-from-zero must carry a label the kubelet will never set (on AWS through the node group's autoscaler template tags), which each provider must qualify.
+### Boundary levels, properties and the acceptance policy
 
-Tools that need more than the qualified configuration are **potential** consumers, not implied ones. Rootless container engines are the main example: normal multi-UID operation uses `newuidmap`/`newgidmap` and subordinate ID ranges, which a non-root pod with `allowPrivilegeEscalation: false` and no capabilities cannot use, and they may also need FUSE, storage drivers or cgroup delegation. Supporting them would be a separately qualified configuration.
-
-For capabilities backed by a `RuntimeClass`, placement uses the `RuntimeClass`'s own `scheduling` field (node selector and tolerations merged into pods by Kubernetes), so packs only set `runtimeClassName`; NIC does not duplicate that mechanism.
-
-### Boundary levels, properties and the ordering rule
-
-ADR-0021 adopts this model as NIC's interface but builds only its first level, `shared-kernel`, with `process-self-restriction`. Later ADRs would add implementations and their properties.
-
-**Levels.** Each level is defined by its promise:
+ADR-0021 adopts this model as NIC's interface but builds only its first level, `shared-kernel`.
 
 | Level | Promise | Diagnostic check on a running pod (not attestation) | Example implementation |
 |---|---|---|---|
@@ -124,176 +126,188 @@ ADR-0021 adopts this model as NIC's interface but builds only its first level, `
 | `mediated-kernel` | Code never makes system calls directly to the host kernel | The kernel release seen inside the pod differs from the node's (`node.status.nodeInfo.kernelVersion`), plus evidence specific to the implementation | A user-space kernel (gVisor) |
 | `hardware-virtualised` | A hardware virtualisation boundary separates code from the host | As above, plus evidence specific to the implementation that the pod runs in its guest. The CPU's hypervisor flag alone is not enough: EC2 nodes already show it, so a gVisor pod on EC2 would pass | A VM runtime (Kata) |
 
-**Ordering rule (normative).** A stronger level satisfies the operator's isolation policy, but satisfies a workload's requirement only when every in-pod capability and property the workload needs also holds there. The order is a policy choice: the levels describe different interfaces between code and host, not points on one security scale. A user-space kernel exposes a small, filtered set of host system calls and implements Linux itself, with gaps; a VM exposes KVM and the VMM's virtual devices and runs a full guest kernel that must also be patched. Each moves the host's protection to different code, either can be weakened by configuration, and they expose different Linux behaviour, so packs are never promised that they run unchanged at a nominally stronger level. NIC ranks the hardware boundary higher because it contains even a compromised guest kernel, and says so where it publishes the order (Luis Cardoso, "Sandboxes for AI", 2026, makes the same point).
+**Acceptance policy (normative).** The order is used only as an operator acceptance policy: "at least `mediated-kernel`" means the operator accepts any qualified implementation at that level or above. It is a NIC convention, not an ecosystem standard or a security ranking. GKE (`gvisor`), AKS Pod Sandboxing (`kata-vm-isolation`) and `RuntimeClass` itself expose concrete runtimes, and the levels describe different interfaces between code and host: a user-space kernel exposes a small, filtered set of host system calls and implements Linux itself, with gaps; a VM exposes KVM and the VMM's virtual devices and runs a full guest kernel that must also be patched. NIC ranks the hardware boundary higher because it contains even a compromised guest kernel (Luis Cardoso, "Sandboxes for AI", 2026, makes the same point), but packs are never promised that they run unchanged at a nominally stronger level, and NIC never substitutes one implementation for another. If more than one implementation could satisfy a requirement, resolution fails unless the operator lists the implementations they accept, in order of preference; that mechanism is future work.
 
-**Properties.** Each implementation carries a list of properties, each established by the probe on each qualified provider, architecture and node OS, and re-established on runtime upgrades. NIC publishes them with the implementation, so packs read what they depend on rather than infer it from the level; properties replace pairwise combination rules. Properties are qualified per implementation, so two implementations of one level (for example Kata installed by NIC on AWS and AKS Pod Sandboxing) are qualified separately and share nothing by default. Values observed so far, from test-only installs recorded in this document (ADR-0021 delivers neither runtime):
+**Properties.** Each implementation carries a versioned **property set**, established by the probe on each qualified provider, architecture and node OS and re-established on runtime upgrades, and published in the mapping entries that use it, so packs read what they depend on rather than infer it from the level. Two implementations of one level (for example Kata installed by NIC on AWS and AKS Pod Sandboxing on Azure Linux) are qualified separately and share nothing by default. Values observed so far, from test-only installs (ADR-0021 delivers neither runtime):
 
 | Property | Default runtime | gVisor | Kata (QEMU, AWS) |
 |---|---|---|---|
-| `process-self-restriction` (Landlock inside) | Where the node kernel meets the floor | No (`ENOSYS`) | Yes (guest ABI 7) |
+| `process-self-restriction` (Landlock inside) | Where the configuration is qualified | No (`ENOSYS`) | Yes (guest ABI 7) |
 | `in-pod-namespaces` (bubblewrap's qualified configurations) | Observed only on AL2023 with no syscall filter (`seccompProfile` unset); not a supported setting | Yes (network namespace created first) | Not yet probed |
-| Pod's `seccompProfile` applied | Yes | No (without `--oci-seccomp`) | No (in the tested configuration) |
+| Pod's `seccompProfile` applied | Yes | No (tested configuration, without `--oci-seccomp`) | No (tested configuration) |
 | Root inside contained from the host kernel | No | Yes | Yes |
 | Fresh `/proc` in a pid namespace | No | Yes | Not yet probed |
 | inotify events for changes made by other pods | Yes | No (polling only) | Not yet probed |
 | Usable memory under a limit | The limit | The limit plus the class overhead | Less than the limit (about 947 MiB at 1 GiB) |
 
-**Precedents.** Managed platforms expose sandboxing in the same shape: GKE Sandbox enables gVisor per node pool and pods opt in with `runtimeClassName: gvisor`; AKS Pod Sandboxing does the same with Kata under its own class name; OpenShift admits workloads to security profiles through Security Context Constraints. Each names a capability or runtime, provides it on some nodes, and lets workloads request it; none orders them, which is what the levels add.
+Measured overheads and incidental compatibility observations such as these are evidence, not semantic promises.
 
-**Limits.** Portability costs features: code written against a level may assume only properties every implementation of that level has, or must name the ones it needs. Properties are qualified per release of each runtime and may change with it.
+### Three states, and what NIC reports
 
-### What NIC publishes and checks
+Everything NIC reports about a capability is in one of three states, kept apart in the data and in the text NIC prints:
 
-Two layers are kept separate so that neither is read as the other, and a third is added by later levels:
+| State | Meaning | Source | Values |
+|---|---|---|---|
+| Qualified expectation | What NIC expects of a bounded configuration (provider, image variant, architecture, version range) | The qualification record (§20.8), applied by the provider to config; `InfraSettings.Sandbox` | `qualified` (with ABI), `unsupported`, `unknown` |
+| Host-kernel baseline | What a node's kernel version implies upstream | A fresh read of the nodes when `nic outputs` (or the end of `nic deploy`) runs, labelled with its time | An ABI, or `not checked` for a group with no nodes; `unassigned` for a node in no group |
+| Enforcement | Whether the sandbox actually holds | Only the consumer, each time it creates a sandbox | Not reported by NIC |
 
-| Layer | Meaning | Where it lives |
-|---|---|---|
-| Declaration | What each node group provides, derived from config | `InfraSettings.Sandbox`, a pure function of config, shown by `nic outputs` |
-| Observation | Which checks ran, their scope and their result | `nic deploy` results, shown by `nic outputs` |
-| Runtime classes (later levels) | One `RuntimeClass` per implementation, labelled with its level | The cluster; none in ADR-0021 |
+`unknown` stays unknown: a baseline at or above the needed ABI never turns it into `qualified`, and a qualified expectation is never upgraded by a newer kernel. Everything here concerns the **default runtime's host environment**: a node can also run gVisor (no Landlock) or Kata (a guest kernel with its own ABI), whose properties are published per implementation. NIC stores no history of these reads.
 
-**Configuration.** The operator may state one requirement:
+### The published mapping
 
-```yaml
-sandbox:
-  minLandlockABI: 4   # optional; nic validate and nic deploy fail if any node group falls below
-```
-
-Named requirement sets, one per kind of workload with its own level and capabilities, were considered and left out until a real need appears; they can be added alongside this setting later.
-
-```go
-// Parsed by pkg/config.
-type SandboxConfig struct {
-    MinLandlockABI int // optional; 0 means nothing is required
-}
-
-// Declaration: reported by each cluster provider in InfraSettings.Sandbox,
-// computed from config only.
-type SandboxSettings struct {
-    NodeGroups map[string]NodeGroupSandbox // keyed by node group; one entry for existing and kind
-}
-
-type NodeGroupSandbox struct {
-    LandlockABI int // from the group's node image; 0 when unknown
-}
-
-// Observation: one entry per check NIC ran.
-type CheckResult struct {
-    Check     string // for example "landlock-kernel-version"
-    NodeGroup string
-    Node      string
-    Time      time.Time
-    Result    string // "pass", "fail", "warning" or "not-run"
-    Detail    string
-}
-```
-
-**Runtime classes for later levels.** A later level is published as one `RuntimeClass` per implementation, named after it (`nebari-gvisor`, `nebari-kata`) and labelled `sandbox.nebari.dev/level: <level>`. Level-named aliases (a class named after a level, pointing at whichever implementation was chosen) were rejected: `RuntimeClass.handler` is immutable, so such a class cannot be moved from `runsc` to `kata` without deleting it, which breaks admission for replacement pods that still name it; one class per level cannot serve two workloads that need different properties at the same level; and the ecosystem names runtimes directly (GKE's `gvisor`, AKS Pod Sandboxing's own class, Agent Sandbox's `SandboxTemplate`s), so an alias would be one more name to translate. Packs and tools select a class by its level label and the properties NIC publishes for it, and never hardcode `nebari-gvisor` or any other implementation name. "At least" is enforced by validation and, where a profile requires a level, by admission that accepts only pods whose class carries a qualifying level label.
-
-**Observation.** For `process-self-restriction` the only observation is `nic deploy`'s kernel check (§20.8), recorded per node with the time it ran and shown by `nic outputs`; NIC writes no in-cluster record. It is a diagnostic inference, not enforcement or attestation. Observation is also how NIC checks runtimes it does not install, such as a provider-managed runtime or an operator's `RuntimeClass` on `existing` clusters: NIC reports what it saw without implying it controls the runtime's installation or version.
-
-The enforcement contract is therefore: each consumer fails closed when it establishes each sandbox, by checking the guarantee itself (for example applying its Landlock ruleset or creating its namespace and refusing to run if that fails), never by reading NIC's results. An in-cluster readiness record with expiry, scheduled re-verification and quarantine of failing nodes was designed for capabilities with installed components; it is deferred, and any capability that wants it must justify it in its own ADR.
-
-**Consumer integration.** Until pack codegen ([ADR-0003](../../adr/0003-software-pack-codegen.md)) exists, packs are integrated **explicitly**: the operator passes the requirement to the pack through its documented Helm values (for `process-self-restriction`, the minimum Landlock ABI; for a later level, the `runtimeClassName` and any settings NIC publishes with it), and the pack refuses to start sandboxed work rather than fall back. `process-self-restriction` needs no placement values: packs schedule normally and check the Landlock ABI at startup. Declaring `requires: { sandbox: [...] }` in `nebari-integration.yaml`, with NIC refusing incompatible packs, is **future work** that depends on ADR-0003.
-
-### Proposed additions: requirement sets and a requirement mapping
-
-ADR-0021 adopts only `sandbox.minLandlockABI`. The exploratory ADRs (ADR-0022 onwards) would add **requirement sets**, one per kind of workload with its own level, in-pod capabilities and properties, under an operator **policy** floor, and a published **requirement mapping** from each set's name to the execution settings that satisfy it (runtime class, seccomp setting, any placement), which packs would read by set name. This is the shape an earlier draft of ADR-0021 proposed, recorded here for those sketches; none of it is part of ADR-0021.
+NIC publishes a mapping from requirement name to concrete values. In ADR-0021 it is computed from config and shown by `nic outputs`; there is no automatic resolution, and `default` is the only entry. The operator copies the values into the pack's Helm values until pack codegen ([ADR-0003](../../adr/0003-software-pack-codegen.md)); packs copy them into pod specs, volume claims and Agent Sandbox `SandboxTemplate`s, which take an exact `runtimeClassName`. Packs never look anything up in the cluster and nothing selects a `RuntimeClass` by label.
 
 ```yaml
+# nic outputs -o yaml (sandbox section; illustrative)
 sandbox:
-  policy:
-    minBoundary: shared-kernel         # floor every set must meet; the default
+  observedAt: 2026-10-28T10:00:00Z        # fresh read of the nodes; nothing is stored
   requirements:
-    - name: agents                     # agent pods on the default runtime
-      boundary: shared-kernel
-      capabilities:
-        - name: process-self-restriction
-          minLandlockABI: 4
-    # A second set, valid only once a later ADR builds the level:
-    # - name: tool-sandboxes
-    #   boundary: mediated-kernel
+    default:
+      level: shared-kernel
+      capabilities: [process-self-restriction]
+      runtimeClassName: ""                 # the cluster's normal runtime
+      placement: {}                        # empty: no node group is known not to qualify
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      workspaceStorageClass:
+        name: gp2                          # InfraSettings.StorageClass: the cluster's normal class
+        notes: ""                          # access mode and ownership notes
+      profile: {}                          # reserved
+      implementation: {}                   # release and property-set version; empty for the default runtime
+  nodeGroups:
+    user:
+      expectation: {state: qualified, landlockABI: 6, record: aws-al2023-x86_64-6.12}
+      baseline:
+        - {node: <name>, kernel: 6.12.111-136.204.amzn2023.x86_64, landlockABI: 6}
+    gpu:
+      expectation: {state: unknown}
+      baseline: not checked                # no nodes when observed
+  unassigned: []
 ```
 
+`placement` for `default` is empty when no node group is known not to qualify. Where some are `unsupported`, it is a node selector for the others, using a label NIC itself sets on node groups through provider config; a provider that cannot set node-group labels leaves it empty and `nic outputs` names the groups that do not qualify. `unknown` groups are not excluded, since excluding them would make most clusters unschedulable; the pack's startup check covers them. Storage portability is part of the entry: a later entry names a storage class known to work with its runtime (the tested gVisor configuration could not write to EFS access points as NIC configures them), not a promise that any storage works.
+
+Later entries may name `RuntimeClass`es NIC installs, one per implementation and named after it (`nebari-gvisor`, `nebari-kata`); provider-managed classes (AKS's `kata-vm-isolation`); or a class the operator owns on an `existing` cluster. Implementation names are NIC's convention for classes it installs, not a requirement on others. Level-named aliases were rejected: `RuntimeClass.handler` is immutable, so such a class cannot be moved from `runsc` to `kata` without deleting it; one class per level cannot serve two workloads that need different properties at the same level; and the ecosystem names runtimes directly. NIC may label its classes `sandbox.nebari.dev/level: <level>` as inventory metadata for its own tooling. For capabilities backed by a `RuntimeClass`, placement can also use the class's own `scheduling` field, which Kubernetes merges into pods.
+
+When automatic resolution is introduced, it must treat a requirement with no matching implementation, or more than one without an operator preference, as a failure (rule (a)).
+
 ```go
-// Parsed by pkg/config.
-type SandboxConfig struct {
-    Policy       SandboxPolicy
-    Requirements []SandboxRequirement // one set today
-}
-
-type SandboxPolicy struct {
-    MinBoundary string // floor for every set; "shared-kernel" by default
-}
-
-type SandboxRequirement struct {
-    Name         string                  // packs look up their settings by this name
-    Boundary     string                  // "shared-kernel" (default), "mediated-kernel" or "hardware-virtualised"
-    Capabilities []CapabilityRequirement // in-pod capabilities, with optional minimums
-    Properties   []string                // further implementation properties the workload needs (later ADRs)
-}
-
-type CapabilityRequirement struct {
-    Name           string
-    MinLandlockABI int // process-self-restriction only; default 3
-}
-
-// Declaration: reported by each cluster provider in InfraSettings.Sandbox,
-// computed from config only.
+// Reported by each cluster provider in InfraSettings.Sandbox, from config only.
 type SandboxSettings struct {
-    NodeGroups map[string]NodeGroupSandbox // keyed by node group; one entry for existing and kind
+    NodeGroups map[string]NodeGroupSandbox // one entry for existing and kind
+    // NodeGroupOf associates a live Node with a node group, using whatever the
+    // provider knows (for example its own node-group label). It is diagnostic
+    // only, never a trusted scheduling label. "" means unassigned.
+    NodeGroupOf func(node *corev1.Node) string
 }
 
 type NodeGroupSandbox struct {
-    LandlockABI     int              // from the group's node image; 0 when unknown
+    Expectation Expectation
+    Placement   map[string]string // a label NIC sets on this group via provider config; nil if none
+}
+
+type Expectation struct {
+    State       string // "qualified", "unsupported" or "unknown"
+    LandlockABI int    // when qualified or unsupported; 0 when unknown
+    Record      string // qualification record entry, when qualified
+}
+
+// Computed by pkg/nic from InfraSettings and config; shown by nic outputs.
+type Requirement struct {
+    Level                 string
+    Capabilities          []string
+    RuntimeClassName      string
+    Placement             Placement // nodeSelector, affinity, tolerations
+    SecurityContext       *corev1.PodSecurityContext
+    WorkspaceStorageClass StorageClassRef
+    Profile               map[string]string // reserved
+    Implementation        Implementation    // release and property-set version; reserved
+}
+
+// Computed live by nic outputs; never stored.
+type Baseline struct {
+    ObservedAt time.Time
+    NodeGroups map[string][]NodeBaseline // a group with no entries is "not checked"
+    Unassigned []NodeBaseline
+}
+
+type NodeBaseline struct {
+    Node        string
+    Kernel      string
+    LandlockABI int // upstream ABI for the kernel version; an inference
+}
+```
+
+### Guidance for later capabilities
+
+**Placement labels.** For runtimes NIC installs, labels that route pods are never writable by nodes. They use a NIC-owned name under the `node-restriction.kubernetes.io/` suffix, `nebari.dev.node-restriction.kubernetes.io/<name>`, which the NodeRestriction admission plugin stops kubelets setting or changing (including through `--node-labels` at registration), and NIC or a cluster-side component applies them through the API. This prevents only **self-asserted scheduling eligibility through kubelet credentials**. It depends on the Node authorizer and NodeRestriction being enabled, kubelet identities scoped to their own nodes, and label-writer permissions being controlled; each provider must verify these with an active negative test using a kubelet identity, and on `existing` clusters they are unknown and treated as failing. Where provider membership authorises placement (for example "this node is in node group `gv`"), the labeller needs a trustworthy node-to-instance binding and must not trust an attacker-supplied `spec.providerID` alone. Compromise of a node that is already authorised is outside the guarantee. A node may set labels under `sandbox.nebari.dev/` about itself only to signal failure; nothing routes pods towards such a label. Autoscaler templates for scale-from-zero must carry a label the kubelet will never set, which each provider must qualify. Provider-managed runtimes (AKS's Kata) are routed by the provider's own labels and trusted as the provider's, and their trust model says so.
+
+**Lifecycle.** Three things change on different terms:
+
+1. **Contract semantics** (capability and profile definitions): an incompatible change needs a new version (`<name>-v2`), published alongside the old one, which keeps its meaning until retired. New evidence and newly qualified configurations keep the name.
+2. **Qualified implementations and releases:** can be added, withdrawn or revoked. A security revocation does not keep an unsafe release for compatibility. Object names such as `nebari-gvisor` stay stable; the release and property-set version are published in the mapping.
+3. **Availability:** what a cluster offers today is not permanent support.
+
+Advertised guarantees must hold on every eligible placement, including during mixed-version rollouts. Managed runtimes such as AKS's upgrade on the provider's schedule, so their qualification records name the provider's versions they cover.
+
+**Admission.** "At least" is not enforced by admission via labels: a `ValidatingAdmissionPolicy` cannot dereference a `RuntimeClass`'s labels, and Kubernetes has no primitive that does. A later profile that restricts runtimes admits pods by a NIC-generated list of approved class names (a parameter object) or a webhook, with fail-closed updates of that list and controlled ownership of the classes it names. The probe policy used in testing was a fixed name list.
+
+**Consumer integration.** Until pack codegen exists, packs are integrated **explicitly**, through the mapping's values in Helm values, and refuse sandboxed work rather than fall back. Declaring `requires: { sandbox: [...] }` in `nebari-integration.yaml`, with NIC refusing incompatible packs, is future work that depends on ADR-0003. An in-cluster readiness record with expiry, scheduled re-verification and quarantine of failing nodes was designed for capabilities with installed components; it is deferred, and any capability that wants it must justify it in its own ADR.
+
+### Proposed additions: more mapping entries (sketches)
+
+ADR-0021 publishes the mapping with one entry, `default`, and no configuration. The exploratory ADRs (ADR-0022 onwards) would add entries to that mapping, in the same shape (§20.6, "The published mapping"); none of this is part of ADR-0021:
+
+1. **Operator-declared entries.** One per kind of workload, each naming a level, the in-pod capabilities it needs and, once a later ADR defines one, a profile:
+
+   ```yaml
+   sandbox:
+     requirements:
+       tool-sandboxes:                  # becomes a mapping entry of the same name
+         level: mediated-kernel         # accepted: this level or above
+         capabilities: []               # gVisor has no Landlock, so none are asked for here
+         accept: [gvisor]               # implementations the operator accepts, in order of preference
+   ```
+
+2. **An acceptance list.** Because NIC never substitutes implementations, an entry that more than one qualified implementation could satisfy names the ones the operator accepts. Resolution fails when nothing in the list qualifies, or when more than one could and there is no list, naming the gap (for example "tool-sandboxes: mediated-kernel on hetzner: no qualified implementation"). Pinning the chosen implementation in node groups' stored specs is left to the ADR that first offers two on one provider.
+
+3. **Implementations per node group.** Each provider would report, beside the group's Landlock expectation, the implementations a group offers, with their level, release and qualified property-set version; the resolved entry copies those into `implementation` and fills `runtimeClassName`, `placement` and `workspaceStorageClass`.
+
+```go
+// Additions to InfraSettings.Sandbox for the sketches.
+type NodeGroupSandbox struct {
+    Expectation     Expectation
+    Placement       map[string]string
     Implementations []Implementation // higher-level runtimes offered here; empty in ADR-0021
 }
 
 type Implementation struct {
-    Name          string            // for example "gvisor"; names its RuntimeClass ("nebari-gvisor")
-    Level         string
-    Properties    map[string]string // probe-qualified properties (table above)
-    Prerequisites []string          // what the group still needs before it qualifies
-}
-
-// Resolution: one entry per requirement set, published as the requirement mapping.
-type ResolvedRequirement struct {
-    Name             string
-    Implementation   string   // "default" in ADR-0021
-    RuntimeClassName string   // empty for the default runtime
-    SeccompProfile   string   // the setting packs apply
-    NodeGroups       []string // groups whose declarations satisfy the set
-}
-
-// Observation: one entry per check NIC ran.
-type CheckResult struct {
-    Check     string // for example "landlock-kernel-version"
-    NodeGroup string
-    Node      string
-    Time      time.Time
-    Result    string // "pass", "fail", "warning" or "not-run"
-    Detail    string
+    Name             string // for example "gvisor"
+    RuntimeClassName string // "nebari-gvisor", or a provider-managed or operator-owned class
+    Level            string
+    Release          string // for example "release-20261012.0"
+    PropertySet      string // qualified property-set version (table above)
+    Prerequisites    []string
 }
 ```
 
-**Resolution.** For each set, `nic validate` takes the stricter of the set's level and the policy floor, keeps the node groups and implementations that meet that level and provide every in-pod capability and property the set names, and publishes the result; if none qualifies it fails and names the gap, for example "set tool-sandboxes: mediated-kernel with process-self-restriction on hetzner: gVisor lacks Landlock; no VM-capable node groups on Hetzner Cloud". With one implementation per level this is a lookup. Choosing between two implementations that both qualify, and recording that choice, are left to the ADR that first offers two on one provider.
-
-**Publishing.** The requirement mapping gives each set's execution settings and points it at one implementation-named `RuntimeClass`; packs read the mapping (by hand until ADR-0003) rather than selecting a class by its level label themselves.
+Packs still receive only concrete values: the resolved entry, copied by the operator (or by pack codegen) into Helm values.
 
 ### Evidence from the higher levels
 
-Before the contract was fixed, the higher levels were exercised on clusters deployed with NIC, using test-only installers that ADR-0021 does not adopt. Each row names what it informed. Run-by-run detail is in "ADR-0023: probe evidence in full" (§20.9).
+Before the contract was fixed, the higher levels were exercised on clusters deployed with NIC, using test-only installers that ADR-0021 does not adopt. Raw output from these runs is not committed; this table and the summaries under `tests/sandbox-probe/` are the record. Run-by-run detail is in "ADR-0023: probe evidence in full" (§20.9).
 
 | Run | Result | Informed |
 |---|---|---|
-| gVisor `release-20261012.0` behind a `RuntimeClass` on EKS 1.34 AL2023, x86 (2026-10-19, 2026-10-27) and arm64 (2026-10-27) | Non-root and root pods ran; Landlock returned `ENOSYS`; the pod's `RuntimeDefault` was ignored (`Seccomp: 0`) | The ordering rule; rule (e); properties published per implementation |
-| gVisor on Hetzner k3s, Ubuntu 24.04 (2026-10-25, 2026-10-27) | As on EKS; k3s enforced NetworkPolicy for gVisor pods as for runc pods | As above |
-| gVisor with home directories on NIC's `efs-sc` (EKS, 2026-10-19) | Not writable: each EFS access point owns its directory as its own UID with mode 700, and gVisor checks permissions itself; access points using the pod's UID and GID worked under both runtimes | Rule (b): qualification covers storage |
+| gVisor `release-20261012.0` behind a `RuntimeClass` on EKS 1.34 AL2023, x86_64 (2026-10-19, 2026-10-27) and arm64 (2026-10-27) | Non-root and root pods ran; Landlock returned `ENOSYS`; the pod's `RuntimeDefault` was ignored (`Seccomp: 0`) | The acceptance policy; rule (d); property sets per implementation |
+| gVisor on Hetzner k3s, Ubuntu 24.04, x86_64 (2026-10-25, 2026-10-27) | As on EKS; k3s enforced NetworkPolicy for gVisor pods as for runc pods | As above |
+| gVisor with home directories on NIC's `efs-sc` (EKS, 2026-10-19) | Not writable: each EFS access point owns its directory as its own UID with mode 700, and gVisor checks permissions itself; access points using the pod's UID and GID worked under both runtimes | Rule (b): qualification covers storage; `workspaceStorageClass` in the mapping |
 | A deliberately failed gVisor install (EKS and Hetzner, 2026-10-25) | Pods sent to the node stayed in `ContainerCreating` rather than run unsandboxed, but `status.runtimeHandlers` still listed `runsc` | Rule (a); `runtimeHandlers` is not evidence of a working runtime |
-| Kata 4.2.0 (QEMU) on EKS 1.34 through EC2 nested virtualisation, `m8i-flex.large` (2026-10-27) | ADR-0021's probe passed inside the guest at Landlock ABI 7; the guest reported `seccomp_mode` 0, so the declared `RuntimeDefault` was not applied | Rule (e); in-pod capabilities differ between implementations of the higher levels |
-| Bubblewrap in a non-root pod on EKS 1.34 AL2023 (2026-10-19), and on Hetzner (2026-10-25) | On EKS it worked only with `seccompProfile` unset (the EKS kubelet default) and failed under `RuntimeDefault`; on Hetzner AppArmor blocked it | `in-pod-namespaces` stays reserved: there is no supported route on the host kernel |
-| Node self-labelling on EKS 1.34 (2026-10-26) | With only its own credentials, a node rewrote its own node-group label, and the change survived a kubelet restart; it could not change taints or set labels under `node-restriction.kubernetes.io/` | Rule (c) |
-| NetworkPolicy on EKS 1.34 (2026-10-19, 2026-10-27) | Not enforced in NIC's EKS clusters by default; once enabled in the VPC CNI, default deny held against root under gVisor and Kata, except towards the pod's own node | Profiles left out until [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) |
+| Kata 4.2.0 (QEMU) on EKS 1.34 through EC2 nested virtualisation, `m8i-flex.large`, x86_64 (2026-10-27) | The probe passed inside the guest at Landlock ABI 7; the guest reported `seccomp_mode` 0, so the declared `RuntimeDefault` was not applied | Rule (d); capabilities differ between implementations |
+| Bubblewrap in a non-root pod on EKS 1.34 AL2023, x86_64 (2026-10-19), and on Hetzner (2026-10-25) | On EKS it worked only with `seccompProfile` unset (the EKS kubelet default) and failed under `RuntimeDefault`; on Hetzner AppArmor blocked it | `in-pod-namespaces` stays reserved |
+| Node self-labelling on EKS 1.34 (2026-10-26) | With only its own credentials, a node rewrote its own node-group label, and the change survived a kubelet restart; it could not change taints or set labels under `node-restriction.kubernetes.io/` | Placement-label guidance |
+| NetworkPolicy on EKS 1.34 (2026-10-19, 2026-10-27) | Not enforced in NIC's EKS clusters by default; once enabled in the VPC CNI, default deny held against root under gVisor and Kata, except towards the pod's own node | Profiles left out until [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691); `default-deny-off-pod-egress` names the own-node gap |
 
 ## 20.7 Lifecycle
 
@@ -304,89 +318,191 @@ Before the contract was fixed, the higher levels were exercised on clusters depl
 3. **Wait for the dependencies to be ready** (for example cert-manager).
 4. Install the capability's components and its versioned profiles.
 5. Verify (§20.10).
-6. Publish the runtime classes, the capabilities and the check results.
+6. Publish the mapping entries, with their implementation release and property-set version.
 
 Today, conditional software ([ADR-0006](../../adr/0006-conditional-foundational-software-helm.md)) is installed inside the provider's `Deploy()`, before ArgoCD and cert-manager exist, and foundational-service failures are reported as warnings rather than failing the deploy. A capability with components therefore needs either a post-bootstrap lifecycle hook in `pkg/nic` or an amendment to ADR-0006. Independently of ADR-0010's fail-closed hardened mode, a capability the operator requires (or opts into on a node group) that fails steps 3-5 makes `nic deploy` exit non-zero.
 
 ## 20.8 Delivery: `process-self-restriction`
 
-1. **No opt-in, no relaxation, no components.** No profiles, no operator, no admission exception and no node preparation are needed. Steps 3-4 of the lifecycle are empty.
-2. **Support policy and floor.** On supported Kubernetes versions, every node group NIC provisions from a provider's default image provides the capability at Landlock ABI 3 or newer; NIC targets ABI 4 (for example Ubuntu 24.04's 6.8 kernel, or AL2023 on 6.12). Each provider reports the floor of each node group in `InfraSettings.Sandbox.NodeGroups[<group>].LandlockABI` as a function of config, from §20.4: AWS ABI 6 from Kubernetes 1.33 and ABI 2 below; Hetzner ABI 4; Azure ABI 1 below 1.35 and, from 1.35, unknown until a maintainer has probed AKS (Ubuntu 24.04 is expected to give ABI 4; earlier versions could qualify if NIC's AKS module exposed `os_sku`). A node group pinned to an image the provider cannot vouch for (for example a GPU image on an older kernel), `existing` and kind report 0 (unknown). NIC does **not** change node images on its own, and explicit image pins are preserved; moving to a qualifying image is an operator change through the provider's own config, as for GPU images.
-3. **`nic validate`.** If the operator sets `sandbox.minLandlockABI`, NIC compares it with the floor of every node group, offline, since the capability has no placement and pods may land on any group. A known floor below the requirement is an error naming the group; an unknown floor is reported and left to `nic deploy`. Without the setting nothing is reported. No labels are set, so NIC's Hetzner provider needs no node-pool label support for this capability.
-4. **`nic deploy` kernel check.** Once nodes are up, NIC reads each node's `node.status.nodeInfo.kernelVersion` and converts it to the Landlock ABI that kernel version introduced upstream (5.13 ABI 1, 5.19 ABI 2, 6.2 ABI 3, 6.7 ABI 4, 6.10 ABI 5, 6.12 ABI 6). A node below `minLandlockABI` fails the deploy; a node below ABI 3 when nothing is required is a warning. Results per node group and node, with the time of the check, are shown by `nic outputs`, which already reads the live cluster. It installs nothing and adds no CLI command. It is a diagnostic inference, not enforcement or attestation: a kernel version does not show Landlock enabled at boot or account for distribution backports, and nodes added after the deploy (autoscaling, replacement) are not checked, which is why consumers check the guarantee themselves. For `existing` clusters and kind (whose kernel is the host's) NIC does not choose the node image, so the floor is unknown and this check is the only judgement: it still fails a deploy whose requirement the nodes' kernels cannot meet.
-5. **Probe: maintainers' release testing; automating it is an open question in ADR-0021.** The probe is the evidence behind each provider's floor. A maintainer runs it on a fresh node of each supported image family before NIC promises the floor there, and again when a provider changes kernel line for a supported Kubernetes version; it is not run on users' clusters. A non-root pod with every capability dropped and the default seccomp profile applies a Landlock ruleset and confirms a denied write fails, reports the highest ABI available and, at ABI 4, confirms a disallowed `connect` fails, and installs a nested seccomp user-notification filter whose supervisor injects a descriptor into the child with `SECCOMP_IOCTL_NOTIF_ADDFD` (with `SECCOMP_ADDFD_FLAG_SEND`), and the child then uses that descriptor. Each denial check has a positive control on the same node (the same write or `connect` succeeds without the ruleset), so an unrelated filesystem or network failure cannot pass as successful confinement. The run also records `/sys/kernel/security/lsm`, so a family whose kernel has Landlock compiled in but not enabled at boot is caught. In-cluster scheduled re-verification applies only to capabilities with installed components.
-6. **Documentation.** A pack-developer page (declare the requirement, check the Landlock ABI at startup, refuse sandboxed work rather than fall back, and the recipe below) and an operator page (the support policy, qualifying provider and version combinations, and what the `nic validate` and `nic deploy` messages mean).
+ADR-0021 delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox.
 
-### Recipe: confining a command
+1. **No opt-in, no relaxation, no components, no configuration.** No profiles, no operator, no admission exception and no node preparation. Steps 3-4 of the lifecycle are empty. A cluster-wide minimum-ABI setting was considered and dropped: one number ignores the runtime (gVisor has no Landlock), cannot judge node groups with no nodes or images nobody has probed, and duplicates the pack's own startup check, which is where the guarantee is enforced.
+2. **Qualified expectations.** Each provider reports, per node group and from config alone, the expectation the qualification record (below) gives for that group's configuration: `qualified` with an ABI for a configuration inside a record's extrapolation range, `unsupported` where the kernel line is known to be below ABI 3, and `unknown` otherwise. Not every default node group on a supported Kubernetes version qualifies: AWS below 1.33 (kernel 6.1, ABI 2) and AKS below 1.35 (Ubuntu 22.04, kernel 5.15, ABI 1) are unsupported; AKS from 1.35, AWS AMI types other than `AL2023_x86_64_STANDARD` (including ARM, NVIDIA and Bottlerocket), images an operator pins, `existing` and kind are unknown. NIC does **not** change node images on its own; moving a group to a qualifying image is an operator change through the provider's own config.
+3. **Reporting and the preflight.** `nic outputs` reads the nodes afresh each time it runs and shows, per node group, the qualified expectation and the host-kernel baseline, labelled "default runtime only" and with the time of the read; nodes the provider's `NodeGroupOf` cannot place are listed as `unassigned`, and groups with no nodes are `not checked`. `nic deploy` prints the same report once the nodes are up. The baseline maps each node's `node.status.nodeInfo.kernelVersion` to the Landlock ABI that kernel version introduced upstream: 5.13 ABI 1, 5.19 ABI 2, 6.2 ABI 3, 6.7 ABI 4, 6.10 ABI 5, 6.12 ABI 6, 6.15 ABI 7. It never warns or fails, is not stored, and is never read as a qualification, because three things defeat it: distribution backports (a lower version with a newer ABI), Landlock built in but not enabled at boot (`EOPNOTSUPP`), and container-runtime seccomp profiles that predate the Landlock system calls and deny them. Nodes added later (autoscaling, replacement) are seen only by the next read.
+4. **Probe and requalification.** The probe ([`tests/sandbox-probe/`](../../../tests/sandbox-probe/README.md)) is the evidence behind each record entry. NIC maintainers run it through the release checklist on a fresh node of each configuration before it is recorded, and again on any **requalification trigger**: a new node-image revision line or kernel line; changed kernel configuration or boot options (for example the LSM list); a container runtime upgrade or a change to its default seccomp profile; a new architecture; or storage becoming part of a promise. It is not run on users' clusters. A non-root pod with every capability dropped and `RuntimeDefault` applies a Landlock ruleset and confirms a denied write and truncation fail, reports the highest ABI, at ABI 4 confirms a disallowed `connect` and `bind` fail, and records `/sys/kernel/security/lsm`. Each denial has a positive control on the same node, so an unrelated failure cannot pass as confinement. The same run checks `seccomp-user-notification` (two stacked filters, listener transfer, `SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SEND`) and reports it separately.
+5. **Reference consumer.** The example below is committed with its end-to-end test under [`tests/sandbox-probe/recipe/`](../../../tests/sandbox-probe/recipe/). It is the qualified consumer of `process-self-restriction`; the code is an example, not part of the contract.
+6. **Documentation.** A pack-developer page (copy the `default` values, do not mount the service-account token, check the Landlock ABI at startup, refuse sandboxed work rather than fall back, the example below) and an operator page (the qualification record, what `nic outputs` reports and what each state means).
 
-This is the qualified consumer of item 5, written for a pack. It is an example, not a library NIC ships: any Landlock library that applies the same ruleset will do. It needs no capability, runs under Pod Security `restricted`, and is shown in Go with `golang.org/x/sys/unix`, as the probe is.
+### Qualification record
 
-1. **Check at startup.** `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` returns the ABI; `ENOSYS` means Landlock is absent and `EOPNOTSUPP` that it is built in but not enabled at boot. Below ABI 3, or below ABI 4 if the pack relies on port rules, refuse sandboxed work.
-2. **Restrict the process that will run the command, then execute it.** Set `no_new_privs`; create a ruleset that handles `WRITE_FILE`, `MAKE_REG`, `REMOVE_FILE` and `TRUNCATE`, with a `PATH_BENEATH` rule granting them beneath the working directory; at ABI 4, also handle `CONNECT_TCP` and `BIND_TCP`, with a `NET_PORT` rule granting `CONNECT_TCP` on the allowed port only; call `landlock_restrict_self`, then `execve` the command. The restriction is inherited by everything the command starts and cannot be lifted.
+The record lists what has been qualified, not every image: unknown combinations stay unknown. Probe results (node names redacted) are under [`tests/sandbox-probe/`](../../../tests/sandbox-probe/README.md#evidence-table).
+
+| Provider, image variant, architecture | Tested image release | Kernel | Container runtime | Pod settings | Probe revision | ABI | Date | Extrapolation range |
+|---|---|---|---|---|---|---|---|---|
+| `aws`, EKS `AL2023_x86_64_STANDARD`, x86_64 (`m6i.large`), Kubernetes 1.34 | AMI release 2023.12.20261012 | 6.12.111-136.204.amzn2023 | containerd 2.3.5 | `pod.yaml` (UID 65532, no capabilities, read-only root, `RuntimeDefault`; also unset) | probe 0.1.0 | 6 | 2026-10-19 | Same variant and architecture on the 6.12 kernel line (Kubernetes 1.33–1.35) |
+| `hetzner`, hetzner-k3s Ubuntu 24.04, x86_64 | Ubuntu 24.04.4 LTS | 6.8.0-138-generic | containerd 2.2.7-k3s1 | As above | probe 0.1.0 | 4 | 2026-10-25 | Ubuntu 24.04 GA kernel line (6.8) on x86_64 |
+
+Unsupported, from the kernel line: AWS AL2023 on 6.1 (Kubernetes 1.31–1.32, ABI 2); AKS Ubuntu 22.04 (5.15, ABI 1). Everything else is unknown until probed, including AL2023 on 6.18 (Kubernetes 1.36–1.37), every arm64 image, GPU images, Bottlerocket, AKS on Ubuntu 24.04 or Azure Linux, `existing` and kind. (kind on a 6.8 Colima VM, 2026-10-15, passed the probe at ABI 4; that is a local observation, not a qualification, since kind's kernel is the host's.)
+
+### Example: confining a command
+
+This is the reference consumer: a **tested reference launcher** for the default runtime, not a library NIC ships and not part of the contract. It runs non-root under Pod Security `restricted` with no added capability. Everything shown in the code below was tested end to end (below); the optional seccomp user-notification mediation mentioned at the end is a capability demonstration in the probe, not part of this launcher.
+
+The agent never confines itself. It starts a **helper**, its own binary re-executed through `/proc/self/exe` with `os/exec`, passing the policy and the command as arguments, a minimal explicit environment (`PATH`, `HOME` and `TMPDIR` set to the work directory, `LANG`) and only standard input, output and error. The helper refuses below Landlock ABI 3, then restricts itself and executes the command, which inherits the restriction and cannot lift it:
+
+- **Landlock** through [go-landlock](https://github.com/landlock-lsm/go-landlock) (v0.11.0), in best-effort mode on its newest ABI, so every right the running kernel knows is handled, including all creation and removal rights (`MAKE_DIR`, `MAKE_SYM`, `MAKE_SOCK`, `MAKE_FIFO`, `MAKE_CHAR`, `MAKE_BLOCK`, `REMOVE_DIR`), `REFER` at ABI 2, `TRUNCATE` at ABI 3 and `IOCTL_DEV` at ABI 5, and, on newer kernels, pathname Unix-socket connection (ABI 9) and UDP (ABI 10). It grants everything beneath the work directory, including moves and links within it (`REFER`; without it, legitimate moves inside the workspace fail) and connecting to sockets there; read and execute beneath listed system paths; read and write on listed files such as `/dev/null`; and at ABI 4 TCP `connect` to one proxy port only and no `bind`. At ABI 6 the command cannot signal, or reach abstract Unix sockets of, processes outside the sandbox. Best effort silently does less on older kernels, which is why the helper checks the ABI first. The library also sets `no_new_privs`.
+- **Reads are restricted** to the work directory and the listed paths (for example `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/proc`), so files elsewhere, including a mounted service-account token, cannot be read. The pack should still not mount the token, and must not put credentials in the listed paths or the work directory.
+- **Optional strict mode** adds a seccomp filter, built with raw `x/sys/unix` calls because go-landlock does not cover seccomp, that makes `socket()` fail for `AF_INET`, `AF_INET6`, `AF_PACKET` and `AF_NETLINK` while leaving `AF_UNIX` for a proxy socket in the work directory, and refuses `io_uring` and foreign or x32 system calls.
+- **Descriptors** other than 0, 1 and 2 are marked close-on-exec with `close_range` before `execve`, so a descriptor the agent leaked without `O_CLOEXEC` does not reach the command.
 
 ```go
-// landlockABI returns the kernel's Landlock ABI, or 0 if Landlock is absent
-// (ENOSYS) or not enabled at boot (EOPNOTSUPP).
-func landlockABI() int {
-	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0,
-		unix.LANDLOCK_CREATE_RULESET_VERSION)
-	if errno != 0 {
-		return 0
-	}
-	return int(abi)
+// Policy is what a confined command may do.
+type Policy struct {
+	WorkDir   string   // read, write, create, remove, move and link beneath it
+	ReadOnly  []string // read and execute beneath, e.g. /usr, /etc, /proc
+	ReadWrite []string // read and write, e.g. /dev/null
+	ProxyPort uint16   // ABI 4+: the only TCP port connect may use; 0 for none
+	NoInet    bool     // seccomp: no IP, packet or netlink sockets at all
 }
 
-// confineAndExec restricts the calling thread and replaces the process with
-// argv: writes only beneath workDir and, at ABI 4 or newer, TCP connect only
-// to port and no TCP bind. abi must be at least 3.
-func confineAndExec(workDir string, port uint64, abi int, argv []string) error {
-	runtime.LockOSThread() // no_new_privs and Landlock apply to this thread
-	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-		return err
+const confineArg = "__confine"
+
+// Agent side: run argv under p in a fresh helper (this binary, re-executed),
+// with a minimal environment and only stdin, stdout and stderr.
+func confinedCommand(p Policy, argv ...string) (*exec.Cmd, error) {
+	pj, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
 	}
-	fs := uint64(unix.LANDLOCK_ACCESS_FS_WRITE_FILE | unix.LANDLOCK_ACCESS_FS_MAKE_REG |
-		unix.LANDLOCK_ACCESS_FS_REMOVE_FILE | unix.LANDLOCK_ACCESS_FS_TRUNCATE)
-	attr := unix.LandlockRulesetAttr{Access_fs: fs}
-	size := unsafe.Sizeof(attr.Access_fs)
-	if abi >= 4 {
-		attr.Access_net = unix.LANDLOCK_ACCESS_NET_CONNECT_TCP | unix.LANDLOCK_ACCESS_NET_BIND_TCP
-		size = unsafe.Offsetof(attr.Scoped)
+	cmd := exec.Command("/proc/self/exe", append([]string{confineArg, string(pj)}, argv...)...)
+	cmd.Dir = p.WorkDir
+	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + p.WorkDir,
+		"TMPDIR=" + p.WorkDir, "LANG=C.UTF-8"}
+	return cmd, nil
+}
+
+// Helper side, first thing in main:
+//
+//	if len(os.Args) > 2 && os.Args[1] == confineArg {
+//		err := confineAndExec(os.Args[2], os.Args[3:]) // returns only on failure
+//		fmt.Fprintln(os.Stderr, "confine:", err)
+//		os.Exit(126)
+//	}
+func confineAndExec(policyJSON string, argv []string) error {
+	var p Policy
+	if err := json.Unmarshal([]byte(policyJSON), &p); err != nil || len(argv) == 0 {
+		return errors.Join(errors.New("bad policy or empty command"), err)
 	}
-	ruleset, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET,
-		uintptr(unsafe.Pointer(&attr)), size, 0)
-	if errno != 0 {
-		return errno
-	}
-	dir, err := unix.Open(workDir, unix.O_PATH|unix.O_CLOEXEC, 0)
+	path, err := exec.LookPath(argv[0])
 	if err != nil {
 		return err
 	}
-	pathRule := unix.LandlockPathBeneathAttr{Allowed_access: fs, Parent_fd: int32(dir)}
-	if _, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset,
-		unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&pathRule)), 0, 0, 0); errno != 0 {
-		return errno
+	if landlockABI() < 3 { // best effort would silently do less: refuse instead
+		return errors.New("Landlock ABI 3 or newer is required")
 	}
-	unix.Close(dir)
-	if abi >= 4 {
-		portRule := struct{ AllowedAccess, Port uint64 }{unix.LANDLOCK_ACCESS_NET_CONNECT_TCP, port}
-		if _, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset,
-			2 /* LANDLOCK_RULE_NET_PORT */, uintptr(unsafe.Pointer(&portRule)), 0, 0, 0); errno != 0 {
-			return errno
+	runtime.LockOSThread() // the seccomp filter applies to this thread, which then execs
+	if err := applyLandlock(p); err != nil {
+		return err
+	}
+	if p.NoInet {
+		if err := denyInetSockets(); err != nil {
+			return err
 		}
 	}
-	if _, _, errno = unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, ruleset, 0, 0); errno != 0 {
-		return errno
+	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
+		return err // inherited descriptors must not reach the command
 	}
-	unix.Close(int(ruleset))
-	return unix.Exec(argv[0], argv, os.Environ())
+	return unix.Exec(path, argv, os.Environ())
+}
+
+// landlockABI returns the kernel's Landlock ABI, or 0 if Landlock is absent
+// (ENOSYS) or not enabled at boot (EOPNOTSUPP).
+func landlockABI() int {
+	abi, err := llsyscall.LandlockGetABIVersion()
+	if err != nil {
+		return 0
+	}
+	return abi
+}
+
+// applyLandlock handles every right go-landlock knows (V11), degrading to what the
+// running kernel supports, and grants: everything beneath the work directory,
+// including moves and links within it (REFER) and connecting to Unix sockets
+// there; read and execute beneath p.ReadOnly; read and write on p.ReadWrite;
+// and, at ABI 4+, TCP connect to p.ProxyPort only. At ABI 6+ the command may
+// not signal, or reach abstract Unix sockets of, processes outside the sandbox.
+// It also sets no_new_privs.
+func applyLandlock(p Policy) error {
+	rules := []landlock.Rule{
+		landlock.RWDirs(p.WorkDir).WithRefer().WithResolveUnix(),
+		landlock.RODirs(p.ReadOnly...).IgnoreIfMissing(),
+		landlock.RWFiles(p.ReadWrite...).IgnoreIfMissing(),
+	}
+	if p.ProxyPort != 0 {
+		rules = append(rules, landlock.ConnectTCP(p.ProxyPort))
+	}
+	return landlock.V11.BestEffort().Restrict(rules...)
+}
+
+// denyInetSockets installs a seccomp filter that makes socket() fail with
+// EPERM for AF_INET, AF_INET6, AF_PACKET and AF_NETLINK (AF_UNIX stays
+// available, for example for a proxy socket in the work directory). It also
+// refuses io_uring, which can create sockets without calling socket(), and
+// any syscall from a foreign or x32 ABI.
+func denyInetSockets() error {
+	arch := map[string]uint32{"amd64": unix.AUDIT_ARCH_X86_64, "arm64": unix.AUDIT_ARCH_AARCH64}[runtime.GOARCH]
+	const (
+		ld, jeq, jge, ret = unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
+			unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K, unix.BPF_RET | unix.BPF_K
+		deny = unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)
+	)
+	filter := []unix.SockFilter{
+		{Code: ld, K: 4}, // seccomp_data.arch
+		{Code: jeq, Jt: 1, K: arch},
+		{Code: ret, K: deny},
+		{Code: ld, K: 0}, // seccomp_data.nr
+		{Code: jge, Jt: 8, K: 0x40000000}, // x32
+		{Code: jeq, Jt: 7, K: unix.SYS_IO_URING_SETUP},
+		{Code: jeq, Jf: 5, K: unix.SYS_SOCKET},
+		{Code: ld, K: 16}, // low 32 bits of args[0], the address family
+		{Code: jeq, Jt: 4, K: unix.AF_INET},
+		{Code: jeq, Jt: 3, K: unix.AF_INET6},
+		{Code: jeq, Jt: 2, K: unix.AF_PACKET},
+		{Code: jeq, Jt: 1, K: unix.AF_NETLINK},
+		{Code: ret, K: unix.SECCOMP_RET_ALLOW},
+		{Code: ret, K: deny},
+	}
+	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	return unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&prog)), 0, 0)
 }
 ```
 
-3. **Optionally, mediate system calls.** A pack that hands the command descriptors (for example a connection to a proxy) installs, before `execve`, a second seccomp filter that returns `SECCOMP_RET_USER_NOTIF` for the chosen system calls, created with `SECCOMP_FILTER_FLAG_NEW_LISTENER`, and passes the listener descriptor to a supervisor process over a Unix socket. The supervisor answers each notification with `SECCOMP_IOCTL_NOTIF_ADDFD` and `SECCOMP_ADDFD_FLAG_SEND`. It must not be used as a check-then-continue policy (§20.11).
+A pack runs it with, for example, `Policy{WorkDir: work, ReadOnly: []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc"}, ReadWrite: []string{"/dev/null"}, ProxyPort: 8080}`.
 
-**What is tested.** On EKS 1.34 AL2023 and Hetzner Ubuntu 24.04 nodes, under `RuntimeDefault`, the probe (item 5) ran the startup check; the filesystem ruleset above, with positive controls, denying a write and a truncation outside the allowed directory; at ABI 4, the port ruleset above, with `connect` to the allowed port succeeding, `connect` to another port and `bind` failing, and UDP unaffected; and step 3 for `openat`, stacked on an allow-all filter. The probe applied the filesystem and port rulesets in separate processes and ran its checks in the restricted process itself. **Not yet tested:** both rulesets in one, and `execve` of a command after restriction (the snippet compiles for Linux but has not been run on a node). The kernel documents that a Landlock domain survives `execve`.
+**What is tested.** On 2026-10-28, `tests/sandbox-probe/recipe/test.sh` ran every case through the helper and as an unconfined control (which must succeed, so a denial is not an unrelated failure), as a non-root user, with the agent holding a canary secret in its environment and a leaked writable descriptor. Environments: Lima VMs on Apple silicon (aarch64), Ubuntu 24.04 (kernel 6.8.0-134-generic, Landlock ABI 4) and Ubuntu 25.04 (6.14.0-37-generic, ABI 6), each directly as UID 501 and inside a container (`nerdctl run --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges`, `python:3.12-slim`, containerd's default seccomp profile, a stand-in service-account token mounted). Results: 35 of 35 cases passed on each VM and 36 of 36 in each container.
 
-**Limits.** The ruleset confines writes only: reads are unrestricted unless the pack also handles read rights (untested here). Port rules check the port, not the address, and do not cover UDP or sockets inherited already connected (§20.3), so the pack closes descriptors the command should not inherit and gives it no credentials it should not use. Landlock does not stop kernel exploits (§20.11).
+| Case | ABI 4 | ABI 6 |
+|---|---|---|
+| Write, `mkdir`, symlink and move between directories inside the work directory | Allowed | Allowed |
+| Create, append, truncate, remove, `mkdir`, symlink (planting, for example `~/.gitconfig`), `rmdir`, `mkfifo`, bind a Unix socket, or move a file out, outside the work directory | Denied | Denied |
+| Grandchild of the command writes outside | Denied | Denied |
+| Write to `/dev/null`; read under the listed paths | Allowed | Allowed |
+| Read a file outside the listed paths (the agent's home, `/var`, the stand-in token) | Denied | Denied |
+| Read the agent's environment through `/proc/<pid>/environ` | Denied | Denied |
+| Agent's canary in the command's environment; write through the leaked descriptor | Absent; denied | Absent; denied |
+| TCP `connect` to the proxy port, also at another address | Allowed | Allowed |
+| TCP `connect` to another port; TCP `bind` | Denied | Denied |
+| UDP send; connect to a pathname Unix socket outside the work directory | Allowed (not covered below ABI 10 and 9) | Allowed (as at ABI 4) |
+| `chmod` a file outside (metadata) | Allowed (not covered) | Allowed (not covered) |
+| Connect to an abstract Unix socket, or signal the agent or another process, outside the sandbox | Allowed (not covered below ABI 6) | Denied |
+| Strict mode: TCP to the proxy port, UDP, IPv6 and netlink sockets | Denied | Denied |
+| Strict mode: Unix socket to a proxy in the work directory; ordinary commands | Allowed | Allowed |
+
+Not tested: kernels at ABI 3, 5 or 7 and above, x86_64 (the binary builds for it), and a Kubernetes pod; the probe covers the Kubernetes pod settings.
+
+**Limits.** Landlock does not cover metadata changes (`chmod`, `chown`, timestamps), descriptors already open when the restriction is applied (hence `close_range`), or anything the agent passes in on purpose: sandboxing a whole agent protects its surroundings from the agent, not credentials deliberately given to the agent from prompt-injected decisions. Port rules check the port, not the address, so without strict mode a command may reach any host on the proxy port; below ABI 10 they do not cover UDP, and below ABI 9 pathname Unix sockets the command can name stay reachable, so keep such sockets out of its view. Without ABI 6, keep the agent's abstract sockets and process out of reach by other means (for example a separate user). Strict mode leaves pathname Unix sockets, so the only network route is whatever proxy listens on one. Landlock does not stop kernel exploits (§20.11).
+
+**Optionally, mediate system calls.** A pack that hands the command descriptors (for example a connection to a proxy) can install, before `execve`, a second seccomp filter that returns `SECCOMP_RET_USER_NOTIF` for chosen system calls and pass the listener to a supervisor that answers with `SECCOMP_IOCTL_NOTIF_ADDFD` and `SECCOMP_ADDFD_FLAG_SEND`. That is `seccomp-user-notification`, reserved and demonstrated only by the probe; it must not be used as a check-then-continue policy (§20.11).
 
 ## 20.9 Future work: delivery of `in-pod-namespaces` (Phase 2)
 
@@ -503,7 +619,7 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 6. Write a marker file recording the installed release. The outcome is decided by this marker, never by shell error handling (`set -e` is ignored inside `( … ) || …`, which in the probe logged success after a failed pull).
 7. After containerd, the kubelet and the CNI are ready (on EKS the first check on every good node failed with `cni plugin not initialized` when it waited only for the kubelet), a node service runs the **end-to-end check**: it starts a test pod sandbox and container **through the CRI** with runtime handler `runsc` (`crictl runp --runtime runsc`, then `crictl create` and `start`; `k3s crictl` on Hetzner), as a non-root user with every capability dropped and the published seccomp setting, and checks that it reports gVisor's kernel (matching `gvisor` in the release string, not a version: one release reports `4.19.0-gvisor`) and passes ADR-0022's capability test. This resolves the CRI plugin's `runtimes.runsc` entry and its options as the kubelet does. `ctr run --runtime io.containerd.runsc.v1` was rejected: it names the shim directly, so a missing or broken handler entry passes it while pods fail (observed locally on 2026-10-27 for a removed entry, a `runtime_type` typo and a shim configuration naming a missing binary, each of which failed the CRI check), and under runsc it cannot write to standard output through non-terminal pipes (on EKS it failed even with a good entry); `runsc do` tests even less. The check retries a bounded number of times and waits for the test container to exit rather than for a fixed time: on EKS a fixed wait failed 20–40% of good runs, and with both changes 20 of 20 passed.
 8. Using the node's own credentials, the service records only failure: the label `sandbox.nebari.dev/gvisor` set to `failed` and a Kubernetes event; on success it writes an informational `sandbox.nebari.dev/gvisor-release` label that nothing routes on. On Hetzner the boot and node steps run as cluster-wide commands that act only on nodes whose name matches an opted-in pool exactly (static nodes are named `<cluster>-pool-<pool>-worker<N>` and autoscaled ones `<cluster>-<pool>-<hex>`, so a pool `sandbox` does not match `sandboxauto`). This depends on hetzner-k3s's node-naming convention, which is why the hetzner-k3s version is validated (below), and because hetzner-k3s per-pool commands do not reach autoscaled nodes. On k3s the node service is ordered after `k3s-agent` and runs at every k3s start. Control-plane groups cannot opt in, so none of this runs on them.
-9. **Placement.** A small NIC-owned component in the cluster, whose only write permission is patching nodes (RBAC cannot narrow that to labels, so the component is pinned by digest and runs on system nodes), sets `node-restriction.kubernetes.io/nebari-sandbox-gvisor: "true"` on a node once (a) the provider's records show the node belongs to an opted-in group (the instance's Auto Scaling group on AWS, matched by the node's `providerID`; the server's pool in the Hetzner API), never the node's own labels, and (b) a check pod pinned to the node with the published settings reports gVisor's kernel. It removes the label when the node reports `sandbox.nebari.dev/gvisor: failed`. The kubelet cannot set or change labels under this prefix, even at registration, so neither a failed node nor a rogue one can attract gVisor pods.
+9. **Placement.** A small NIC-owned component in the cluster, whose only write permission is patching nodes (RBAC cannot narrow that to labels, so the component is pinned by digest and runs on system nodes), sets `nebari.dev.node-restriction.kubernetes.io/sandbox-gvisor: "true"` on a node once (a) the provider's records show the node belongs to an opted-in group, through a trustworthy node-to-instance binding (on AWS the instance's Auto Scaling group, with the instance identity confirmed from the EC2 API rather than taken from the node's own `spec.providerID` alone; on Hetzner the server's pool in the Hetzner API), never the node's own labels, and (b) a check pod pinned to the node with the published settings reports gVisor's kernel. It removes the label when the node reports `sandbox.nebari.dev/gvisor: failed`. The kubelet cannot set or change labels under this prefix, even at registration, so neither a failed node nor a rogue one can attract gVisor pods through its own credentials. This depends on the Node authorizer and NodeRestriction, verified per provider with a negative test using a kubelet identity, and does not cover a compromised node that already carries the label (ADR-0021's placement guidance).
 
 **Why routing uses a label nodes cannot write.** Earlier drafts routed on `sandbox.nebari.dev/user-space-kernel` set to `"true"` on every node of an opted-in group through the provider's node-group labels, with a failed node relabelling itself `"false"`. That worked with both providers' plumbing and autoscaler templates, but the label was writable by the node: any compromised node could set it, and on Hetzner, where the metadata service exposed the k3s join token, a rogue machine could register as a node of an opted-in pool and attract every sandbox pod. On k3s it also showed `"true"` for about 3 s after each agent restart, because k3s re-applies its command-line labels at every start. A label under `node-restriction.kubernetes.io/` closes all three: nodes cannot write it and k3s does not re-apply it. Two other alternatives were rejected earlier and stay rejected. A selector naming the pinned release strands pods: the `RuntimeClass` admission plugin copies the selector into each pod when it is created. A failure taint cannot be set by the node: node-restriction admission does not let a node modify its own taints (observed on EKS, 2026-10-26).
 
@@ -511,7 +627,7 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 
 **Failed nodes and scaling.** The install retries with backoff for a bounded period (30 minutes proposed); on success it clears its failure label, the labeller (re)applies the placement label after its own check, so transient failures (a registry blip) heal on the same node. If it still fails, the node keeps its failure label, never receives the placement label, emits an event and **remains in service for its other workloads**: a failure of an optional runtime never takes a node down. NIC does not retire failed nodes. The cluster autoscaler records a scale-up as successful once the node registers and reports Ready, so nothing a node does afterwards (powering off, stopping its kubelet) turns it into a failed scale-up that triggers backoff; powering off would also take the node's other workloads with it, on AWS the Auto Scaling group would replace a stopped instance immediately, on Hetzner a stopped server is still billed, and enough unready nodes would make the autoscaler pause scale-ups for the whole cluster. The consequence is accepted and stated: during a persistent failure (for example a registry outage), a pending gVisor pod can grow an opted-in group to its maximum with nodes that serve other workloads but no gVisor pods, so operators set modest maximums on opted-in groups. Automatic replacement and stopping scale-up for a failing group need a component running in the cluster, which is future work. Observed 2026-10-27: on EKS a pending gVisor pod grew a failing group from 0 to its maximum of 2 and then stopped; on Hetzner the group stayed at one node, because the autoscaler built its template from the live, failed node.
 
-**Deploy-time verification.** When a requirement set resolves to gVisor, `nic deploy` runs a short-lived smoke pod on every labelled node of every opted-in group (bounded by group size), from an image NIC publishes alongside the gVisor artifact, with the published `runtimeClassName`, the published pod settings and a pin to that node. It must report gVisor's kernel (the kernel release inside differs from the node's `kernelVersion` and names gVisor, which a VM guest would not) and, when `in-pod-namespaces` is also required, pass ADR-0022's capability test. Like every check here it is a diagnostic, not attestation. This exercises admission, `RuntimeClass` scheduling and the pod's security context, which the node-side check cannot. A failure fails the deploy. Groups at zero nodes are reported as unverified until they scale up. **Verification-only mode.** On `existing` clusters, and kind clusters whose nodes the operator prepared, NIC owns neither the node groups nor the runtime (`pkg/providers/cluster/existing` treats infrastructure as externally owned). The operator names the `RuntimeClass` and its level in the sandbox configuration, and NIC publishes that name in the requirement mapping; NIC checks that it exists, runs the smoke pod on every node it can schedule to, and never creates, changes or deletes it. The opted-in-group and toolchain checks do not apply.
+**Deploy-time verification.** When a mapping entry resolves to gVisor, `nic deploy` runs a short-lived smoke pod on every labelled node of every opted-in group (bounded by group size), from an image NIC publishes alongside the gVisor artifact, with the published `runtimeClassName`, the published pod settings and a pin to that node. It must report gVisor's kernel (the kernel release inside differs from the node's `kernelVersion` and names gVisor, which a VM guest would not) and, when `in-pod-namespaces` is also required, pass ADR-0022's capability test. Like every check here it is a diagnostic, not attestation. This exercises admission, `RuntimeClass` scheduling and the pod's security context, which the node-side check cannot. A failure fails the deploy. Groups at zero nodes are reported as unverified until they scale up. **Verification-only mode.** On `existing` clusters, and kind clusters whose nodes the operator prepared, NIC owns neither the node groups nor the runtime (`pkg/providers/cluster/existing` treats infrastructure as externally owned). The operator names the `RuntimeClass` and its level in the sandbox configuration, and NIC publishes that name in the requirement mapping; NIC checks that it exists, runs the smoke pod on every node it can schedule to, and never creates, changes or deletes it. The opted-in-group and toolchain checks do not apply.
 
 **Upgrades.** ADR-0023 no longer depends on a particular rollout mechanism; it states lifecycle invariants (unverified nodes never run gVisor pods; a broken runtime never causes unsandboxed fallback; semantics changes are explicit; security updates have a path; interrupted operations have documented recovery). The first operating model meets them with the providers' own node replacement: on AWS a release change updates the group's launch template and the managed node group replaces nodes; on Hetzner, where gVisor runs only on autoscaled pools, new nodes boot the new release and the operator drains and deletes the old ones. New nodes receive gVisor pods only once labelled, so a broken release leaves pods Pending rather than on broken nodes; what it costs is capacity and per-session sandboxes on drained nodes, which end. Pods without a controller (per-session sandboxes, interactive servers started by a hub) must be recreatable by their pack; that is the pack's acceptance test. A blue/green mechanism that keeps capacity and verifies a whole new group before moving work (sketched in [ADR-0024](../../adr/0024-immutable-node-pool-rollouts.md), [§21](21-node-pool-rollouts.md)) is one candidate if sessions or capacity must survive upgrades; its inputs from this design would be the gVisor release and artifact digest, the installer version and the containerd handler configuration.
 
@@ -543,7 +659,7 @@ ADR-0023 states these as requirements; the mechanisms are recorded here. Each is
 - a node outside any opted-in group (for example one registered by hand with the join token) never labelled by the labeller, and a node trying to set the placement label itself refused;
 - the deploy-time smoke pods on every node of every opted-in group, and groups at zero reported as unverified;
 - a release change through each provider's node replacement with gVisor pods created continuously: none lands on an unlabelled node, a deliberately broken release leaves them Pending, reverting it recovers, and the pack's acceptance test (recreating its controller-less pods, with a PVC-backed workspace) passes on the new nodes;
-- dropping the requirement set leaving the `RuntimeClass` in place, and an `existing` cluster with an operator-installed `RuntimeClass` verified without being changed and its name published;
+- dropping the mapping entry leaving the `RuntimeClass` in place, and an `existing` cluster with an operator-installed `RuntimeClass` verified without being changed and its name published;
 - an unqualified hetzner-k3s binary or k3s release rejected before nodes are created;
 - pods under memory limits with the configured `RuntimeClass` overhead, at realistic sizes, and JupyterLab timings.
 
@@ -581,7 +697,7 @@ The run-by-run detail follows.
 
 #### Local probe (2026-10-17)
 
-On an Ubuntu 24.04 VM (kernel 6.8, arm64; the OS and kernel Hetzner uses) with Docker and gVisor `release-20261012.0`, non-root and with every capability dropped (2026-10-17; `tests/sandbox-probe/gvisor-local/`):
+On an Ubuntu 24.04 VM (kernel 6.8, arm64; the OS and kernel Hetzner uses) with Docker and gVisor `release-20261012.0`, non-root and with every capability dropped (2026-10-17; raw output not committed):
 
 - Bubblewrap's qualified configurations from ADR-0022 work inside gVisor and hide environment, home-directory and service-account canaries, sockets outside the bound paths, and the network (including `169.254.169.254`), with one workaround: bubblewrap's own `--unshare-net` fails because gVisor pre-configures the new namespace's loopback ([gVisor #13438](https://github.com/google/gvisor/issues/13438), open; [bubblewrap #745](https://github.com/containers/bubblewrap/issues/745), open). Creating the network namespace first with `unshare --user --map-current-user --net` and running bubblewrap without `--unshare-net` works.
 - A sandbox can have its own pid namespace and a fresh `/proc`, which a normal container cannot. That closes the two limits ADR-0022 states: sandboxed commands can no longer signal the agent or read other processes' command lines.
@@ -604,7 +720,7 @@ On an EKS 1.34 cluster deployed with NIC (AL2023 x86, kernel 6.12, containerd 2.
 
 #### EKS: tool-execution sandbox under gVisor (2026-10-27, second run)
 
-EKS 1.34 deployed with NIC from `main`; a probe `gv` group (m6i.large, gVisor `release-20261012.0` installed at boot, tainted); `RuntimeClass` overhead 64 MiB. Raw output in `tests/sandbox-probe/session5-results/aws/` (`t2-*.txt`); the network-policy and admission results from the same run are in §22, and the Kata results in §23.
+EKS 1.34 deployed with NIC from `main`; a probe `gv` group (m6i.large, gVisor `release-20261012.0` installed at boot, tainted); `RuntimeClass` overhead 64 MiB. Raw output is not committed; the network-policy and admission results from the same run are in §22, and the Kata results in §23.
 
 - **Pattern:** an Alpine sandbox pod running sshd and sftp-server as root, `automountServiceAccountToken: false`, no Secrets (the authorised key in a ConfigMap), a 2 GiB gp3 workspace PVC; an agent pod in another namespace held the private key.
 - **Tool calls:** `ssh` ran commands as UID 0 (kernel `4.19.0-gvisor`); `sftp` wrote and read `/workspace/note.txt` and a later command edited it.
@@ -613,7 +729,7 @@ EKS 1.34 deployed with NIC from `main`; a probe `gv` group (m6i.large, gVisor `r
 
 #### EKS: node check, failures, storage, memory and arm64 (2026-10-27)
 
-EKS 1.34 in us-east-1 deployed with NIC from `main`, AL2023 x86 (`m6i.large`) and arm64 (`m7g.large`) groups, gVisor installed at boot by a probe launch template. Raw output in `tests/sandbox-probe/session4-results/aws/`.
+EKS 1.34 in us-east-1 deployed with NIC from `main`, AL2023 x86 (`m6i.large`) and arm64 (`m7g.large`) groups, gVisor installed at boot by a probe launch template. Raw output is not committed.
 
 - **CRI node check:** passed 10 of 10 on x86 and arm64; failed with the CRI `runtimes.runsc` entry removed (`no runtime for "runsc"`) and passed once restored. It needs the CNI ready, bounded retries and a wait for the container to exit (above). `ctr run --runtime io.containerd.runsc.v1` failed with or without the entry.
 - **Failed install:** a wrong pinned digest was rejected on each of three attempts; the node labelled itself `"false"` about 40 s after boot, before it was Ready; a runc pod ran there; a pending gVisor pod grew the group from 0 to its maximum of 2, where the autoscaler stopped.
@@ -627,7 +743,7 @@ EKS 1.34 in us-east-1 deployed with NIC from `main`, AL2023 x86 (`m6i.large`) an
 
 #### Hetzner: pool lifecycle, failures, storage and memory (2026-10-27)
 
-hetzner-k3s v2.4.6 driven directly (NIC lacks pool labels and boot commands), Ubuntu 24.04 x86, k3s v1.34. Raw output in `tests/sandbox-probe/session4-results/hetzner/`.
+hetzner-k3s v2.4.6 driven directly (NIC lacks pool labels and boot commands), Ubuntu 24.04 x86, k3s v1.34. Raw output is not committed.
 
 - **Taints (ADR-0024):** changing a pool's taint and re-running `create` restarts the k3s agent with the new flag, but the existing node keeps its old taint: k3s applies taints only at registration. Taints added or removed through the API survive agent restarts. New nodes register with the configured taint.
 - **Fixed size:** hetzner-k3s rejects min = max. With min 1 and max 2 the autoscaler stopped at 2 and built its template from a live node; a server deleted through the API was replaced in about 100 s with the configured taint.
@@ -642,7 +758,7 @@ hetzner-k3s v2.4.6 driven directly (NIC lacks pool labels and boot commands), Ub
 
 #### Local VM: CRI node check, file watching and artifact trust (2026-10-27)
 
-Colima VM (aarch64, Ubuntu 24.04, k3s), gVisor `release-20261012.0`. Raw output in `tests/sandbox-probe/session4-results/local/`.
+Colima VM (aarch64, Ubuntu 24.04, k3s), gVisor `release-20261012.0`. Raw output is not committed.
 
 - **CRI node check:** with a good handler entry, `crictl runp --runtime runsc` then `create` and `start`, non-root with every capability dropped, reported gVisor's kernel and passed the capability test. With the entry removed (`no runtime for "runsc" is configured`), a `runtime_type` typo (`failed to resolve runtime path`) or the shim's configuration naming a missing binary (`OCI runtime create failed: fork/exec`), the CRI check failed while `ctr run --runtime io.containerd.runsc.v1` passed in all three. A runc control with `RuntimeDefault` failed the capability test, as it should.
 - **File watching across pods:** a watcher (inotify, plus listing and `stat` every 0.5 s) in one pod and a writer in another, over NFS and local storage. A gVisor watcher received inotify events only for changes from its own sandbox; changes from other pods, runc or gVisor, were seen only by polling, within the polling interval. A runc watcher saw changes made from gVisor pods through inotify.
@@ -657,7 +773,7 @@ On a local k3s cluster (`v1.34.12+k3s1`, arm64, in the Colima VM) and a Hetzner 
 - **Memory (512 MiB limit, same node):** an allocator in 16 MiB steps was OOM-killed at 496 MiB under runc and 480 MiB under gVisor, identically on both clusters; writing and reading back 1.5 GiB of files completed under both runtimes; both terminated the whole container.
 - **Pool matching:** gVisor was installed on `nic-probe-hz3-pool-sandbox-worker1` and not on the `general` node, and only that node listed `runsc` in `status.runtimeHandlers`.
 
-Scripts and output: `tests/sandbox-probe/session3-results/`.
+Scripts and output are not committed; this summary is the record.
 
 #### EKS node self-labelling spike (2026-10-26)
 
@@ -668,7 +784,7 @@ On an EKS 1.34 AL2023 cluster deployed with NIC, a script run on one node as tha
 - could **not** modify its own taints (`node "…" is not allowed to modify taints`);
 - could not read or modify the other node, and could not set a label under the reserved `node-restriction.kubernetes.io/` prefix.
 
-Scripts and output: `tests/sandbox-probe/spike-results/`.
+Scripts and output are not committed; this summary is the record.
 
 #### Hetzner and EKS-with-FSx probe (2026-10-25)
 
@@ -687,8 +803,8 @@ On a Hetzner cluster deployed with NIC (Ubuntu 24.04, kernel 6.8, k3s with conta
 
 ## 20.10 Verification
 
-- **Per node group, then per node.** For `process-self-restriction`, NIC checks each node's kernel version against the requirement during `nic deploy`, and the probe runs only in maintainers' release testing unless automating it is adopted (§20.8). Where probes are used, they run on each node group that should provide a capability, placed with that capability's own selectors and tolerations. For Phase 2, the per-node probe also gates the readiness barrier.
-- **Primitive tests, in both directions.** For `process-self-restriction`: Landlock and seccomp cases above. For `in-pod-namespaces` inside gVisor: the capability test and qualified configurations succeed with the published settings. Filtered implementation (deferred): the qualified invocation succeeds with the profile; a pod without the profile on the same node cannot create a user namespace; netfilter and raw-socket creation fail from inside a new user namespace.
+- **Per node group, then per node.** For `process-self-restriction`, NIC reports each node's kernel baseline when `nic outputs` runs, for diagnosis only, and the probe runs only in maintainers' release testing unless automating it is adopted (§20.8). Where probes are used, they run on each node group that should provide a capability, placed with that capability's own selectors and tolerations. For Phase 2, the per-node probe also gates the readiness barrier.
+- **Primitive tests, in both directions.** For `process-self-restriction`: the probe's Landlock cases and the reference consumer's end-to-end test in §20.8, each denial with a positive control. For `in-pod-namespaces` inside gVisor: the capability test and qualified configurations succeed with the published settings. Filtered implementation (deferred): the qualified invocation succeeds with the profile; a pod without the profile on the same node cannot create a user namespace; netfilter and raw-socket creation fail from inside a new user namespace.
 - **Consumer acceptance test (Gate D).** Separately from the primitive, one real pack must show, with the capability in use:
   - credential canaries placed in the agent's environment, files and mounted secrets are not readable by sandboxed commands;
   - inherited file and socket descriptors are closed or explicitly allowed;
@@ -798,11 +914,11 @@ Install a complete agent-sandbox platform as NIC's sandboxing answer and have pa
 - **Pros:** a much stronger boundary than rows 2 and 3, appropriate for attacker-influenced or multi-tenant code; egress policy, credential injection, suspend/resume and density come built in rather than being assembled by each pack; an ecosystem is forming around it.
 - **Cons:**
   - A different isolation unit: many actors share a worker pod, so NIC's pod-level guarantees (network policy, admission) cannot separate actors; that is the platform's job, and its isolation between actors on one node is still a roadmap item. (The earlier objection that it replaces the pod model no longer separates it from NIC's own direction, which also runs untrusted work in separate sandbox pods.)
-  - Cannot run on NIC's providers today: Agent Substrate needs Kubernetes 1.36 or later with beta pod-certificate APIs (`PodCertificateRequest`, `ClusterTrustBundle`) that managed services do not let you enable (realistically 1.37), enforced NetworkPolicy ([#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) is blocked), changes to GKE-specific node paths, and KVM-capable nodes for its microVM class (not Hetzner Cloud; its gVisor class needs none).
+  - Not qualified or supported by NIC: Agent Substrate needs Kubernetes 1.36 or later with beta pod-certificate APIs (`PodCertificateRequest`, `ClusterTrustBundle`) that managed services do not let you enable (realistically 1.37), enforced NetworkPolicy ([#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) is blocked), changes to GKE-specific node paths, and KVM-capable nodes for its microVM class (not Hetzner Cloud; its gVisor class needs none).
   - A weaker pod-level posture: its worker pods are no longer `privileged`, but run as root with 13 added capabilities (including `SYS_ADMIN`, `NET_ADMIN`, `SYS_PTRACE`), seccomp and AppArmor unconfined, and `/dev/kvm` and `/dev/net/tun` for microVMs; its node agent mounts host paths. ADR-0010's hardened mode would have to admit that by exception, whereas `process-self-restriction` runs under Pod Security `restricted`.
   - A large operational footprint: API server, controller, router, egress gateway, node agent, an identity (OIDC) server, a pod-certificate signer, embedded OpenFGA, PostgreSQL and object storage.
 
-Not chosen as the starting point. Because actors are not pods with published settings and the platform runs its own runtime binaries, it cannot provide a level through NIC's runtime classes; where it can run, it is separately trusted infrastructure on dedicated node groups, close to host root, not an implementation of a level. If packs converge on such a platform, the future `in-pod-namespaces` work can be deprioritised; `process-self-restriction` remains useful either way.
+Not chosen as the starting point. Because actors are not pods with published settings and the platform runs its own runtime binaries, it cannot provide a level through NIC's mapping; where it can run, it is separately trusted infrastructure on dedicated node groups, close to host root, not an implementation of a level. If packs converge on such a platform, the future `in-pod-namespaces` work can be deprioritised; `process-self-restriction` remains useful either way.
 
 ### Option 6: Node Feature Discovery
 
@@ -810,14 +926,14 @@ Node Feature Discovery, a Kubernetes SIG project, runs a DaemonSet that reads ea
 
 ### Option 7: Node-group labels from an image table
 
-An earlier draft of ADR-0021 advertised `process-self-restriction` per node group rather than through a provider-wide floor:
+An earlier draft of ADR-0021 advertised `process-self-restriction` with node-group labels rather than only reporting an expectation per node group:
 
 1. **Image table.** NIC kept a table mapping each node image it provisions to the Landlock ABI it provides. An image entered the table only after a manual probe run on it confirmed the capability under the exact pod settings; images not in the table were not advertised.
 2. **Placement at node-group creation.** The provider predicted the capability from the node group's image when creating the group, reported it in `InfraSettings.Sandbox`, and applied `sandbox.nebari.dev/process-self-restriction` and `sandbox.nebari.dev/landlock-abi` as node-group labels (the same mechanism as GPU groups), so replacement and autoscaled nodes carried them from the start. Where node groups differed in ABI, each level got its own placement, and packs that needed ABI 4 selected it. NIC's Hetzner provider needed node-pool label support added. For `existing` and kind clusters NIC labelled nothing; operators could label nodes themselves at their own risk.
 3. **Consistency check and readiness record.** During `nic deploy`, NIC compared each node's kernel version and OS image (`node.status.nodeInfo`) with its group's prediction and recorded mismatches (for example a manually upgraded node) in a read-only readiness record shown by `nic outputs`, reporting but not relabelling.
 
 - **Pros:** steers pods away from non-qualifying node groups in mixed clusters; per-placement ABI guarantees.
-- **Cons:** nearly every image NIC provisions on supported versions qualifies, so the steering rarely matters; a table to keep current, label plumbing in every provider and a readiness record for that small benefit.
+- **Cons:** steering matters only in mixed clusters, and packs check Landlock at startup anyway; a table to keep current, label plumbing in every provider and a readiness record for that benefit. The `default` mapping entry renders a placement from NIC-set node-group labels where a provider has them (§20.6), which covers the mixed-cluster case without a separate table.
 
 It can be added later, without changing the capability's name or guarantee, if mixed clusters become common.
 
@@ -829,6 +945,8 @@ It can be added later, without changing the capability's name or guarantee, if m
 - [ADR-0017: User Journey Tests](../../adr/0017-user-journey-tests-for-foundational-software.md)
 - [bubblewrap](https://github.com/containers/bubblewrap)
 - [Landlock](https://docs.kernel.org/security/landlock.html)
+- [go-landlock](https://github.com/landlock-lsm/go-landlock)
+- [Sandbox probe and reference consumer](../../../tests/sandbox-probe/README.md)
 - [Kubernetes v1.36: User Namespaces GA](https://kubernetes.io/blog/2026/04/23/kubernetes-v1-36-userns-ga/)
 - [KEP-4265: ProcMount option](https://www.kubernetes.dev/resources/keps/4265/)
 - [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards)
