@@ -25,7 +25,8 @@ Cluster-wide, once per cluster that uses the profile:
 
 | Object | Purpose |
 |---|---|
-| `ValidatingAdmissionPolicy` `nic-sandbox-pool-tolerations` | On create and update, allows a toleration for a sandbox pool's taint (explicit, or a blanket `operator: Exists`) only for pods using a `RuntimeClass` with a `sandbox.nebari.dev/level` label; `kube-system` and NIC's node-level DaemonSets exempt. A taint alone let a runc pod that added the toleration run on a gVisor node (22.10) |
+| `ValidatingAdmissionPolicy` `nic-sandbox-pool-tolerations` | On create and update, allows a toleration for a sandbox pool's taint (explicit, or a blanket `operator: Exists`) only for pods whose `runtimeClassName` is on the approved list below; `kube-system` and NIC's node-level DaemonSets exempt. A taint alone let a runc pod that added the toleration run on a gVisor node (22.10) |
+| Parameter object `nic-approved-runtime-classes`, read by the pod and toleration policies through `paramRef` | The NIC-generated list of `RuntimeClass` names ADR-0021's acceptance policy allows for the profile's level. A `ValidatingAdmissionPolicy` cannot dereference a class's labels, so admission checks names, never the `sandbox.nebari.dev/level` label. NIC updates the list fail-closed (a class leaves the list before NIC changes or removes it) and lists only classes whose ownership is controlled: NIC's own, or provider-managed and operator-owned classes the operator names |
 | On AWS, the `vpc-cni` add-on's `configuration_values`: `enableNetworkPolicy: "true"` and `env.NETWORK_POLICY_ENFORCING_MODE: strict` | Enforcement with no window at pod start; NIC's EKS module sets neither today, and a later `nic deploy` leaves hand-set values in place without guaranteeing them. Strict mode is cluster-wide: every new pod is denied all traffic until a policy selects it, so NIC must first ship a NetworkPolicy for every namespace it manages (foundational services and packs), as the #675 trial found |
 | Pod Security `enforce: restricted` on each namespace in `peer_namespaces` | Trusted pods that mount a sandbox's workspace run with `allowPrivilegeEscalation: false`, so setuid files planted by root in a sandbox on `no_root_squash` storage give them nothing |
 | A host-side rule on sandbox node groups, written at boot, dropping traffic from pod addresses to the node's own addresses | The CNI's policy does not cover a pod's traffic to its own node (22.10); the mechanism (an nftables rule in the node's boot steps on AWS and k3s) is to be qualified, including that the kubelet's and CNI's own traffic to pods is unaffected |
@@ -36,7 +37,7 @@ NIC owns these objects, labels them as NIC-managed, and fails the deploy if it c
 
 Rejected in an untrusted-execution namespace, on create and update:
 
-- no `runtimeClassName` (above `shared-kernel`), or one whose `RuntimeClass` lacks a `sandbox.nebari.dev/level` label at or above the profile's level;
+- no `runtimeClassName` (above `shared-kernel`), or one not on `nic-approved-runtime-classes`;
 - any ephemeral container (the policy matches `pods` and `pods/ephemeralcontainers`; matching only `pods` let an ephemeral container read a Secret into a running sandbox pod, 22.10);
 - `automountServiceAccountToken` not explicitly `false` (pod or ServiceAccount), or a projected service-account token volume;
 - Secret volumes, projected Secrets, `env.valueFrom.secretKeyRef` or `envFrom.secretRef`, except in a credential namespace (below), where a projected service-account token is still rejected;
@@ -69,6 +70,8 @@ NetworkPolicies other than NIC's own in these namespaces may only:
 - allow egress to the cluster DNS service on port 53, only when `allow_dns` is set.
 
 Rejected: any `ipBlock` (egress or ingress), selectors that match namespaces by any other label, and empty selectors that would match every namespace. Because NetworkPolicies are additive, this is what prevents a pack's allow-all from undoing the default deny. DNS is denied by default because a sandbox using an explicit proxy needs none and queries are an exfiltration channel.
+
+Request layers are subject to the same rules. Agent Sandbox v1.0.8's managed networking creates, for each sandbox, an egress NetworkPolicy that allows public egress through an `ipBlock`, which this policy rejects. Integrating it therefore needs explicit network-policy handling: either a custom policy that is qualified against these rules, or `networkPolicyManagement: Unmanaged`, with the pack supplying policies that pass admission.
 
 ## 22.5 Enforcement per provider
 
@@ -169,7 +172,7 @@ An earlier draft gave platforms a second profile: dedicated pools, an exact priv
 
 ### EKS, 2026-10-27
 
-EKS 1.34 in us-east-1 deployed with NIC from `main`; probe groups `gv` (m6i.large, gVisor) and `kata` (m8i-flex.large, Kata 4.2.0), both tainted as dedicated. Raw output in `tests/sandbox-probe/session5-results/aws/` (`t2-*`, `t3a-*`, `t3b-*`, `t3c-*`).
+EKS 1.34 in us-east-1 deployed with NIC from `main`; probe groups `gv` (m6i.large, gVisor) and `kata` (m8i-flex.large, Kata 4.2.0), both tainted as dedicated. Raw output is not committed; this summary is the record. The admission policy used in this run named the approved runtime classes in a fixed list; it did not read level labels.
 
 - **Sandbox pods:** Alpine with sshd and sftp-server as root, `automountServiceAccountToken: false`, no Secrets (the authorised key in a ConfigMap), a gp3 workspace PVC, reached over SSH and SFTP from an agent pod in another namespace, under gVisor and Kata. Before any policy: no token file; IMDSv2 refused (hop limit 1) and IMDSv1 401; Pod Identity 400; API server and the node's kubelet 401; the node's port 22 and the internet reachable.
 - **Enforcement off by default:** NIC's EKS module (v0.7.0) installs `vpc-cni` without `configuration_values`; a deny-all policy had no effect although the node agent and the PolicyEndpoint CRD were present. Re-running `nic deploy` (no changes) left hand-set add-on values in place.

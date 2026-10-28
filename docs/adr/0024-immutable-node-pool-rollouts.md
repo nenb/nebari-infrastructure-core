@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021. It is one candidate lifecycle mechanism for [ADR-0023](0023-user-space-kernel-capability.md)'s opted-in pools, which do not depend on it: ADR-0023 states lifecycle invariants that simpler or provider-managed mechanisms can also meet. Revised 2026-10-28: dependencies narrowed after review; the review's points on autoscaler races, fencing, state location, rendering and recovery after promotion are not yet addressed. Mechanisms, the qualification list and the verification checklist are in the [design doc](../design-doc/implementation/21-node-pool-rollouts.md).
+Proposed (DRAFT, exploratory; expected last in order, only if sessions must survive node upgrades): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021. It is one candidate lifecycle mechanism for [ADR-0023](0023-user-space-kernel-capability.md)'s opted-in pools, which do not depend on it: ADR-0023 states lifecycle invariants that simpler or provider-managed mechanisms can also meet. Revised 2026-10-28: dependencies narrowed after review; the review's points on autoscaler races, fencing, state location, rendering and recovery after promotion are not yet addressed. Mechanisms, the qualification list and the verification checklist are in the [design doc](../design-doc/implementation/21-node-pool-rollouts.md).
 
 ## Date
 
