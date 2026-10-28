@@ -101,8 +101,6 @@ A later entry might name a `RuntimeClass` that NIC installs (named after the imp
 - **Prove before promising.** Nothing is promised for a configuration until it is qualified.
 - **State a trust model.** Every later level, capability or profile says who is trusted, what hostile code may do, what NIC enforces, what the pack must enforce, and what is not covered.
 
-Later ADRs that add runtimes should also follow the guidance in [§20.6](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/docs/design-doc/implementation/20-workload-sandboxing.md#guidance-for-later-capabilities) on placement labels, versioning and admission.
-
 ### Delivered now
 
 **What Landlock gives.** A process can restrict itself and its descendants: which files they may read, write, create or remove; at ABI 4, which TCP ports they may connect to or bind (by port, not address, and not UDP); at ABI 6, signals and abstract Unix sockets outside the sandbox. It does not cover metadata changes such as `chmod`, descriptors already open, or credentials in the environment. Keeping the service-account token out needs a pod setting (`automountServiceAccountToken: false`); no network needs a seccomp filter in the process or, from outside the pod, a later profile.
