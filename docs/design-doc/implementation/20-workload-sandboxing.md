@@ -4,6 +4,8 @@
 
 This document holds the implementation design behind [ADR-0021: Workload Sandboxing Capability Contract for Software Packs](../../adr/0021-gradual-workload-sandboxing-for-software-packs.md). The ADR records the decision: a tool-neutral contract on three axes (boundary level, in-pod capability, profile), a published mapping of concrete values packs copy, and rules for later additions, delivering a qualified description of `process-self-restriction` (Landlock on the default runtime) with a read-only diagnostic report. This document records the detail that implements and justifies it: the sandboxing spectrum, provider findings, the full contract, delivery, evidence from probes of the higher levels, verification, security considerations and related work. Where the two disagree, the ADR is authoritative for the decision and this document is updated to match.
 
+It also holds detail for the exploratory ADRs built on that contract (ADR-0022 onwards). They are sketches, not decisions, and propose entries for ADR-0021's published mapping and other additions it does not adopt; the sections that belong to them (§20.9, §20.12, §20.14, §20.15, "Proposed additions: more mapping entries (sketches)" in §20.6, and subsections named after an ADR) say so.
+
 ## 20.2 The sandboxing spectrum
 
 | # | Option | Examples | What isolates the code | Cluster changes needed | Main limits | Place in this ADR |
@@ -68,8 +70,8 @@ Where the providers stand on these layers. Entries marked *(unverified)* are inf
 
 | Provider | Layer 1 (node kernel) | Layer 2 (seccomp) | Layer 3 (AppArmor) | Layer 4 (pod user namespaces) |
 |---|---|---|---|---|
-| `aws` (AL2023) | OK (observed, 2026-10-19) | Blocked under `RuntimeDefault`; profile needed | n/a (no AppArmor) | Depends on AMI kernel/containerd *(unverified)* |
-| `hetzner` (hetzner-k3s, Ubuntu 24.04) | Blocked by the AppArmor sysctl | Blocked under `RuntimeDefault`; profile needed | Profile needed | Example config pins Kubernetes 1.32 |
+| `aws` (AL2023) | OK (observed on EKS 1.34, 2026-10-19) | Blocked under `RuntimeDefault` (observed); no filter when unset | n/a (no AppArmor; SELinux permissive) | Masked: a fresh procfs fails (observed) |
+| `hetzner` (hetzner-k3s, Ubuntu 24.04) | Restricted by the AppArmor sysctl (`apparmor_restrict_unprivileged_userns=1`, observed) | Blocked under `RuntimeDefault`; profile needed | Blocks `mount` (observed on NIC-deployed nodes, 2026-10-25) | Masked |
 | `azure` (AKS, Ubuntu 22.04) | Expected OK *(unverified)* | Blocked under `RuntimeDefault`; profile needed | Profile needed | 5.15 kernel; likely unsupported *(unverified)* |
 | `local` (kind) | Host-dependent | Blocked under `RuntimeDefault`; profile needed | kind runs its node containers with `apparmor=unconfined` and `seccomp=unconfined`; whether the containerd inside a node applies AppArmor to pods depends on the host (live test needed on Linux hosts with AppArmor; kind's known issues advise disabling interfering host profiles) | Host-dependent |
 | `existing` | Unknown | Blocked under `RuntimeDefault`; profile needed | Unknown | Unknown; detect only |
@@ -89,7 +91,7 @@ ADR-0021 states the contract on three independent axes: an ordered **boundary le
 |---|---|---|---|
 | `process-self-restriction` | A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict its own and its descendants' filesystem access with Landlock at ABI 3 or newer, and TCP connect and bind at ABI 4 or newer (the ABI is part of each qualification). | The probe (§20.8): filesystem and TCP rulesets against positive controls in a restricted pod, with a verdict for each. The reference launcher (§20.8) is tested on local VMs, containers and in CI, awaiting provider qualification | **Described (ADR-0021)**: qualified per configuration; enforcement is the consumer's |
 | `seccomp-user-notification` | The same process can install nested seccomp filters with user notification, including `SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SEND`. User notification is a mechanism for emulating syscalls or injecting descriptors, not a policy check: a supervisor that inspects arguments and then lets the call continue can race with changes to that memory, as the Linux manual warns. | The probe's notification path (two stacked filters, listener transfer, descriptor injection) | Reserved. Probed separately because a container runtime or default-profile change can break it independently of the kernel |
-| `in-pod-namespaces` | A non-root process with no added capabilities can create a user namespace that maps **only its own UID and GID**, and mount, network, IPC and UTS namespaces inside it. The container's masked `/proc` is retained (bind-mounted, not freshly mounted), so no pid namespace with a fresh procfs is guaranteed. | One pinned bubblewrap version with a fixed, tested invocation | Reserved; needs its own ADR |
+| `in-pod-namespaces` | A non-root process with no added capabilities, applying the published settings, can create a user namespace that maps **only its own UID and GID**, and mount, network, IPC and UTS namespaces inside it. The container's masked `/proc` is retained (bind-mounted, not freshly mounted), so no pid namespace with a fresh procfs is guaranteed. | One pinned bubblewrap version: a capability test and two qualified configurations (§20.9) | Sketched in [ADR-0022](../../adr/0022-in-pod-namespaces-capability.md); no supported route yet |
 
 **Profiles.** A profile is a composition of **atomic guarantees**, each of which the cluster enforces around a pod and can check from outside it, for example:
 
@@ -261,6 +263,45 @@ Advertised guarantees must hold on every eligible placement, including during mi
 
 **Consumer integration.** Until pack codegen exists, packs are integrated **explicitly**, through the mapping's values in Helm values, and refuse sandboxed work rather than fall back. Declaring `requires: { sandbox: [...] }` in `nebari-integration.yaml`, with NIC refusing incompatible packs, is future work that depends on ADR-0003. An in-cluster readiness record with expiry, scheduled re-verification and quarantine of failing nodes was designed for capabilities with installed components; it is deferred, and any capability that wants it must justify it in its own ADR.
 
+### Proposed additions: more mapping entries (sketches)
+
+ADR-0021 publishes the mapping with one entry, `default`, and no configuration. The exploratory ADRs (ADR-0022 onwards) would add entries to that mapping, in the same shape (§20.6, "The published mapping"); none of this is part of ADR-0021:
+
+1. **Operator-declared entries.** One per kind of workload, each naming a level, the in-pod capabilities it needs and, once a later ADR defines one, a profile:
+
+   ```yaml
+   sandbox:
+     requirements:
+       tool-sandboxes:                  # becomes a mapping entry of the same name
+         level: mediated-kernel         # accepted: this level or above
+         capabilities: []               # gVisor has no Landlock, so none are asked for here
+         accept: [gvisor]               # implementations the operator accepts, in order of preference
+   ```
+
+2. **An acceptance list.** Because NIC never substitutes implementations, an entry that more than one qualified implementation could satisfy names the ones the operator accepts. Resolution fails when nothing in the list qualifies, or when more than one could and there is no list, naming the gap (for example "tool-sandboxes: mediated-kernel on hetzner: no qualified implementation"). Pinning the chosen implementation in node groups' stored specs is left to the ADR that first offers two on one provider.
+
+3. **Implementations per node group.** Each provider would report, beside the group's Landlock expectation, the implementations a group offers, with their level, release and qualified property-set version; the resolved entry copies those into `implementation` and fills `runtimeClassName`, `placement` and `workspaceStorageClass`.
+
+```go
+// Additions to InfraSettings.Sandbox for the sketches.
+type NodeGroupSandbox struct {
+    Expectation     Expectation
+    Placement       map[string]string
+    Implementations []Implementation // higher-level runtimes offered here; empty in ADR-0021
+}
+
+type Implementation struct {
+    Name             string // for example "gvisor"
+    RuntimeClassName string // "nebari-gvisor", or a provider-managed or operator-owned class
+    Level            string
+    Release          string // for example "release-20261012.0"
+    PropertySet      string // qualified property-set version (table above)
+    Prerequisites    []string
+}
+```
+
+Packs still receive only concrete values: the resolved entry, copied by the operator (or by pack codegen) into Helm values.
+
 ### Evidence from the higher levels
 
 Before the contract was fixed, the higher levels were exercised on clusters deployed with NIC, using test-only installers that ADR-0021 does not adopt. Raw output from these runs is not committed; this table and the summaries under `tests/sandbox-probe/` are the record.
@@ -284,7 +325,7 @@ Before the contract was fixed, the higher levels were exercised on clusters depl
 2. Foundational services bootstrap (ArgoCD and the foundational applications).
 3. **Wait for the dependencies to be ready** (for example cert-manager).
 4. Install the capability's components and its versioned profiles.
-5. Verify (§20.9).
+5. Verify (§20.10).
 6. Publish the mapping entries, with their implementation release and property-set version.
 
 Today, conditional software ([ADR-0006](../../adr/0006-conditional-foundational-software-helm.md)) is installed inside the provider's `Deploy()`, before ArgoCD and cert-manager exist, and foundational-service failures are reported as warnings rather than failing the deploy. A capability with components therefore needs either a post-bootstrap lifecycle hook in `pkg/nic` or an amendment to ADR-0006. Independently of ADR-0010's fail-closed hardened mode, a capability the operator requires (or opts into on a node group) that fails steps 3-5 makes `nic deploy` exit non-zero.
@@ -532,17 +573,114 @@ A pack runs it with, for example, `Policy{WorkDir: work, ReadOnly: []string{"/us
 
 The CI job runs on every pull request to `main`; on a runner below ABI 3 its end-to-end step would be skipped with a warning, never reported as passed. At ABI 8 the ABI 6 column applies. Not tested: kernels at ABI 3, 5, 7 or 9 and above (ABI 3 refusal is covered by the capped-ABI unit test), and a Kubernetes pod or a provider node; the probe covers the Kubernetes pod settings, and the launcher awaits provider qualification.
 
-**Limits.** Landlock does not cover metadata changes (`chmod`, `chown`, timestamps), descriptors already open when the restriction is applied (hence `close_range`), or anything the agent passes in on purpose: sandboxing a whole agent protects its surroundings from the agent, not credentials deliberately given to the agent from prompt-injected decisions. Port rules check the port, not the address, so a `proxy-port` command may reach any host on the proxy port; below ABI 10 they do not cover UDP. Below ABI 9 the command can connect to pathname Unix sockets outside the work directory that it can name, and below ABI 6 to abstract sockets and signal processes outside the sandbox. Non-Unix socket restriction does not change that, so a Unix-socket proxy is the only network route only where no other Unix service is reachable from the command: a deployment precondition the pack must ensure (for example, the agent's own sockets and process run as a separate user or outside the pod), or else a separate execution environment. Landlock does not stop kernel exploits (§20.10).
+**Limits.** Landlock does not cover metadata changes (`chmod`, `chown`, timestamps), descriptors already open when the restriction is applied (hence `close_range`), or anything the agent passes in on purpose: sandboxing a whole agent protects its surroundings from the agent, not credentials deliberately given to the agent from prompt-injected decisions. Port rules check the port, not the address, so a `proxy-port` command may reach any host on the proxy port; below ABI 10 they do not cover UDP. Below ABI 9 the command can connect to pathname Unix sockets outside the work directory that it can name, and below ABI 6 to abstract sockets and signal processes outside the sandbox. Non-Unix socket restriction does not change that, so a Unix-socket proxy is the only network route only where no other Unix service is reachable from the command: a deployment precondition the pack must ensure (for example, the agent's own sockets and process run as a separate user or outside the pod), or else a separate execution environment. Landlock does not stop kernel exploits (§20.11).
 
 **The workspace is untrusted input.** Files a confined command writes inside the work directory can be executed later by the unconfined agent or its tools: a `.git/config` with `core.fsmonitor` or hooks runs on the agent's next `git status`, an `.envrc` on entering the directory with direnv, a `conftest.py` on the next `pytest`. Landlock confines the command, not what the agent later does with its output. The agent must treat the workspace as untrusted input: run tools there through the launcher too, or with hardened invocations (for example `git -c core.fsmonitor= -c core.hooksPath=/dev/null`, and no automatic environment loading).
 
-**Optionally, mediate system calls.** A pack that hands the command descriptors (for example a connection to a proxy) can install, before `execve`, a second seccomp filter that returns `SECCOMP_RET_USER_NOTIF` for chosen system calls and pass the listener to a supervisor that answers with `SECCOMP_IOCTL_NOTIF_ADDFD` and `SECCOMP_ADDFD_FLAG_SEND`. That is `seccomp-user-notification`, reserved and demonstrated only by the probe; it must not be used as a check-then-continue policy (§20.10).
+**Optionally, mediate system calls.** A pack that hands the command descriptors (for example a connection to a proxy) can install, before `execve`, a second seccomp filter that returns `SECCOMP_RET_USER_NOTIF` for chosen system calls and pass the listener to a supervisor that answers with `SECCOMP_IOCTL_NOTIF_ADDFD` and `SECCOMP_ADDFD_FLAG_SEND`. That is `seccomp-user-notification`, reserved and demonstrated only by the probe; it must not be used as a check-then-continue policy (§20.11).
 
-## 20.9 Verification
+## 20.9 Future work: delivery of `in-pod-namespaces` (Phase 2)
 
-- **Per node group, then per node.** For `process-self-restriction`, NIC reports each node's kernel baseline when `nic outputs` runs, for diagnosis only, and the probe runs only in maintainers' requalification runs unless automating it is adopted (§20.8). Where probes are used, they run on each node group that should provide a capability, placed with that capability's own selectors and tolerations.
-- **Primitive tests, in both directions.** For `process-self-restriction`: the probe's Landlock cases and the reference launcher's unit and end-to-end tests in §20.8, each denial with a positive control. A later capability states its own, including a negative case on the same node.
-- **Consumer acceptance test (later capabilities).** Separately from the primitive, before a later capability is promised, one real pack must show, with the capability in use:
+This section holds the detail behind [ADR-0022](../../adr/0022-in-pod-namespaces-capability.md), an exploratory sketch that defines `in-pod-namespaces` and its qualified configurations but has **no supported delivery route yet**; ADR-0021 delivers only `process-self-restriction`. ADR-0022's intended first route is bubblewrap inside a gVisor implementation of `mediated-kernel` (§20.12), which needs none of this section's node machinery. The unfiltered AL2023 behaviour is recorded as evidence below, not as a setting. The gates and steps that follow design the **filtered implementation** (a NIC-owned seccomp profile on dedicated node groups), which ADR-0022 defers because of its maintenance cost; they are kept for reference in case a pack ever needs the capability where gVisor cannot run. An earlier draft adapted them for AWS by writing the profile and setting `seccompDefault` at node boot, without the Security Profiles Operator, post-bootstrap phase or readiness barrier; that variant is in "ADR-0022: the filtered implementation in full" below.
+
+Phase 2 ships only when all of its **release gates** are met:
+
+- **Gate A, AppArmor mechanism.** The Security Profiles Operator (v1.1.1) can distribute seccomp profiles, but its `AppArmorProfile` API offers only abstract executable, filesystem, network, capability and ptrace rules: it cannot express a `userns` grant, scoped `mount` rules, or raw policy. Until a maintained mechanism can express the required AppArmor policy (upstream SPO support, or another maintained loader), Phase 2 is offered **only on node groups without AppArmor** (for example AWS AL2023). A NIC-owned privileged AppArmor loader would be substantial additional scope and needs its own decision.
+- **Gate B, Hetzner autoscaling.** hetzner-k3s v2.4.6 applies per-pool pre-k3s commands to initially created workers, but its autoscaler cloud-init uses the global settings instead of pool overrides. Until that is fixed upstream (and NIC pins the fixed version) or another verified preparation mechanism exists, NIC rejects autoscaling on Hetzner pools that request `in-pod-namespaces`. The gate is closed only by testing a node the autoscaler created.
+- **Gate C, versioned profiles.** The seccomp profile exists as a reviewed, immutable artifact (item 5 of §20.9), with adversarial tests passing.
+- **Gate D, qualified consumer.** The pinned bubblewrap invocation passes the primitive tests, and one real pack passes the consumer acceptance test (§20.10).
+
+When the gates are met:
+
+1. **Opt-in per node group** through a per-node-group `sandbox` block.
+2. **Dedicated placement.** `in-pod-namespaces` node groups are **tainted by default** (`sandbox.nebari.dev/in-pod-namespaces=true:NoSchedule`), following the AWS GPU precedent, which taints GPU node groups rather than only labelling them. A taint is a placement control, not authorization, so admission restricts which namespaces may carry the matching toleration (§20.11, item 2). Pods already running on a node group when it is converted are drained as part of the change. Without the taint and the admission rule, the ADR makes no claim that foundational workloads are kept off these nodes.
+3. **Node preparation (layer 1)**, only where needed: on Hetzner, per-pool pre-k3s commands that lift Ubuntu's restriction (preferably a scoped AppArmor `userns` grant rather than the global sysctl) once Gate A allows AppArmor nodes; elsewhere, labels and taints only, unless verification shows otherwise. The kubelet runs with `seccompDefault: true` on these node groups (§20.11, item 1).
+4. **Readiness barrier.** New nodes in these node groups register with a startup taint, `sandbox.nebari.dev/in-pod-namespaces-unverified:NoSchedule`, which is removed only once the node has its profiles installed and passes the per-node probe. This covers autoscaled and replacement nodes, which a deploy-time probe does not. The barrier holds only with these invariants:
+   - **Consumers tolerate the dedication taint, never the unverified taint.** Only trusted installer, probe and system workloads (the profile operator's daemon, the verifier) tolerate the unverified taint.
+   - **Admission rejects wildcard tolerations** (an empty key with `operator: Exists`) and tolerations of the unverified taint from untrusted namespaces, and rejects untrusted direct node assignment (`spec.nodeName`) that bypasses the scheduler.
+   - **Each supported autoscaler recognises the unverified taint as a startup taint.** A taint is not a startup taint just because of its name: Cluster Autoscaler only treats its own prefix, or keys passed with `--startup-taint`, that way, and otherwise a scale-from-zero node group can look permanently unsuitable for waiting pods. NIC's AWS autoscaler configuration sets no such flag today, so NIC must configure it, and scale-from-zero is tested per provider.
+   - **The bootstrap components have capacity outside the gated pool,** so the verifier and profile installer can always run before any gated node is ready.
+5. **Profiles.** NIC owns a complete seccomp policy, not a delta: a `Localhost` profile **replaces** `RuntimeDefault` rather than extending it, and the operator's base-profile mechanism references another stored profile, not the node runtime's generated default. NIC therefore maintains the full allowlist, per architecture, and tracks runtime default changes. The profile:
+   - is immutable and **versioned in its name** (`nebari-sandbox-v1`, then `-v2`); a change is a new version, and pods opt into a version explicitly;
+   - blocks netfilter configuration by filtering `socket()` on its arguments (netlink netfilter and raw packet sockets), together with the relevant legacy socket options, with stated assumptions about inherited descriptors and compatibility syscall ABIs;
+   - makes `clone3` fail with `ENOSYS` so programs fall back to `clone`: seccomp cannot inspect `clone3`'s flags, which are passed in a structure in memory rather than in registers, so namespace flags can only be filtered on `clone` and `unshare`;
+   - is installed through the Security Profiles Operator, pinned by digest, with its daemon restricted to these node groups by node affinity and tolerations.
+
+   Rollout semantics differ by mechanism and are documented: a new seccomp version affects only processes started with it, so old versions stay installed until every declared consumer has migrated or the operator explicitly retires the version. Current pod count is not a retirement signal: a Deployment scaled to zero, a CronJob or a KubeSpawner configuration can launch the old version later. Newly added nodes receive every still-supported version, not only the newest; AppArmor policy replacement can change already-running processes, so AppArmor profiles (once Gate A allows them) are never replaced in place.
+6. **Qualified invocation.** The primitive is qualified with one pinned bubblewrap version and a fixed invocation of the form `bwrap --unshare-user --unshare-ipc --unshare-uts --unshare-net --ro-bind / / --ro-bind /proc /proc --dev /dev --tmpfs /tmp --die-with-parent --new-session -- <command>` (exact flags fixed in the implementation), with no pid namespace and no fresh procfs.
+
+### Qualified configurations and profile contents (ADR-0022)
+
+ADR-0022 summarises these; the full detail is recorded here.
+
+- **The capability test** proves only that the namespaces can be created: `unshare --user --map-current-user --net -- bwrap --unshare-user --unshare-ipc --unshare-uts --unshare-pid --ro-bind / / --ro-bind /proc /proc --dev /dev --die-with-parent -- true`. It exposes the whole container read-only and is not a sandbox policy.
+- **The qualified consumer configuration** is what packs start from and what the acceptance test runs against. It binds only what a command needs and hides everything else, in the form `unshare --user --map-current-user --net -- bwrap --unshare-user --unshare-ipc --unshare-uts --unshare-pid --clearenv --setenv PATH /usr/bin:/bin --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --ro-bind /etc/ssl /etc/ssl --tmpfs <home> --bind <workdir> <workdir> --ro-bind /proc /proc --dev /dev --tmpfs /tmp --die-with-parent --new-session -- <command>` (exact flags fixed in the implementation). Order matters: bubblewrap applies mounts in sequence, so `<home>` must be masked before `<workdir>` is bound when the work directory is inside the home directory; the reverse order hides the work directory (found by the 2026-10-17 probe). `/lib64` is needed on x86, where the dynamic loader lives; without it every command fails with `execvp ...: No such file or directory` (found by the 2026-10-19 EKS probe). The network namespace is created by `unshare` (util-linux) before bubblewrap runs, rather than by bubblewrap's `--unshare-net`, because bubblewrap's own loopback setup fails under gVisor ([gVisor #13438](https://github.com/google/gvisor/issues/13438)); the `unshare`-first form worked on both runc (EKS AL2023) and gVisor, so packs use one form everywhere and need not detect the runtime. `--unshare-pid` with the container's `/proc` bound read-only also worked on both and stops sandboxed commands signalling the agent; under gVisor only, packs may replace `--ro-bind /proc /proc` with `--proc /proc` for a fresh procfs that also hides other processes' command lines (a normal container refuses that mount). The agent's home directory, configuration, mounted secrets, service-account token paths and socket directories are not bound, and `--clearenv` stops credentials in environment variables from passing through.
+- **The qualified networked configuration** is the same, except that instead of no network at all, the sandboxed command reaches the network only through a proxy the pack runs outside the sandbox: the pack binds the proxy's Unix socket into the sandbox (for example `--bind <proxy-socket-dir> <proxy-socket-dir>`) and points the command's `HTTP_PROXY`/`HTTPS_PROXY` at a small in-sandbox forwarder to that socket. The sandbox still has its own network namespace with only a loopback interface, so nothing else is reachable, including the cloud instance metadata service. The proxy decides which destinations are allowed and can inject credentials so they never enter the sandbox.
+
+The qualified configurations are secure starting points: packs extend them with the specific paths their tools need (for example a virtualenv, `/usr/local` or a toolchain directory), never with `/` or the home directory, and the acceptance test runs against the extended version.
+
+**The seccomp profile (filtered implementation, deferred).** Under the filtered implementation (ADR-0022's Option 4), NIC would own a complete `Localhost` profile, `nebari-sandbox-v1` (a `Localhost` profile replaces `RuntimeDefault` rather than extending it, so NIC maintains the full allowlist per architecture). It permits the namespace syscalls, makes `clone3` fail with `ENOSYS` (seccomp cannot inspect its flags), and blocks netfilter configuration by filtering `socket()` on its arguments while allowing what bubblewrap needs to bring up a loopback interface. It keeps denying the families that widen the kernel surface reachable from a user namespace: `bpf`, the `io_uring` calls, `keyctl`/`add_key`/`request_key`, `userfaultfd`, `perf_event_open`, kernel-module and `kexec` calls, and `open_by_handle_at`. Seccomp cannot filter which filesystem type a `mount` inside a user namespace uses, so bugs in, for example, overlayfs mounted from user namespaces (CVE-2023-0386) are covered only by kernel patching. A change is a new version (`-v2`) shipped alongside the old ones; because profiles are written at boot, a new version reaches nodes through a node-group rolling update, which replaces nodes one at a time and evicts the sandboxing pods on each, ending users' running sessions. That is acceptable for routine changes, which should be rare. If a profile fix ever has to land faster than a rolling update allows, the planned mechanism is a minimal in-node writer that only copies new profile versions into place, added by amending this ADR. Old versions stay until declared consumers have migrated or the operator retires them.
+
+### ADR-0022: admission policy and alternatives in full
+
+ADR-0022 summarises these; the full text is recorded here.
+
+**Admission policy (filtered implementation).** When a node group enables the capability, the provider installs a small chart containing a ValidatingAdmissionPolicy the way providers already install conditional charts (for example the GPU operator), following [ADR-0006](../../adr/0006-conditional-foundational-software-helm.md)'s provider-driven approach and moving to its shared interface (#349) once that exists; in hardened mode, ADR-0010's admission policy does the same job. Only namespaces labelled for the capability may reference `nebari-sandbox-v*` or tolerate the dedication taint, and only cluster administrators may set that namespace label, so a namespace owner cannot grant it to themselves. In workload namespaces, wildcard tolerations (an empty key with `operator: Exists`) and direct node assignment (`spec.nodeName`) onto these nodes are rejected unless the namespace is labelled; `kube-system` and NIC's foundational namespaces are exempt, because system DaemonSets such as the VPC CNI, kube-proxy, CSI drivers and monitoring agents rely on wildcard tolerations to run on every node. Pack namespaces are normally created by ArgoCD from the GitOps repository, so ArgoCD's identity is among those allowed to set the label: anyone who can write to that repository can grant the capability, which is consistent with ADR-0010's position that repository write is equivalent to cluster administration.
+
+**Alternatives.**
+
+- **Where a filtered profile could come from.** No Kubernetes runtime ships a default profile that allows namespace creation. containerd's default allows `mount`, `unshare` and namespace `clone` only when the container has `CAP_SYS_ADMIN`. Podman's default profile ([`containers/common`](https://github.com/podman-container-tools/container-libs/blob/main/common/pkg/seccomp/seccomp.json), about 1,100 lines of JSON) allows `clone`, `mount`, `pivot_root`, `setns`, `umount2` and `unshare` unconditionally, but CRI-O, which builds on it, removes `clone`, `clone3` and `unshare` for Kubernetes, citing the risk of unprivileged containers creating namespaces. The filtered implementation therefore has three sources for its profile:
+  - **NIC writes it** (the design below): full control, including the `clone3` and netfilter restrictions, at the cost of owning a complete allowlist per architecture.
+  - **NIC pins Podman's profile:** NIC bundles and tracks an upstream file instead of writing one, but inherits a profile designed for Podman's threat model that CRI-O judged too permissive for Kubernetes, without the netfilter block; any delta NIC adds brings ownership back.
+  - **Packs supply profiles through the Security Profiles Operator:** a pack ships a `SeccompProfile` resource and SPO writes it to nodes. NIC installs SPO instead of writing profiles, but the admission policy must then restrict which namespaces may load and use profiles (a custom profile can allow more than `RuntimeDefault`, and Pod Security accepts any `Localhost` profile), each pack's profile needs review, and profiles reach new nodes after they join, so pods can race them (they fail safe). A single shared profile owned by the Pack Specification is a middle ground.
+- **Option 6 with a pod user namespace (`pod-user-namespaces`):** with `hostUsers: false`, the pod's `CAP_SYS_ADMIN` applies only inside its own user namespace, and containerd's default profile allows the namespace calls when that capability is present, so containerd keeps owning the filter. It needs an admission exception (Pod Security rejects added capabilities), grants the capability to the whole container, needs containerd 2.x and a kernel with idmapped mounts (not yet confirmed on NIC's EKS images), and does not lift AppArmor's `mount` denial on Ubuntu nodes.
+- **Option 5 (the existing pod under gVisor, at the `mediated-kernel` level):** the pod stays as it is, and gVisor intercepts its syscalls in a user-space kernel, so a host-kernel exploit from the pod is far harder. It needs no unprivileged user namespaces, no NIC-owned seccomp allowlist and no AppArmor work, and its default mode needs no hardware virtualisation, so it could reach Hetzner Cloud and AKS sooner. Its costs: installing gVisor and a `RuntimeClass` per provider, compatibility gaps and I/O overhead for some workloads, limited GPU support, and checking that the pack's stack (for example JupyterLab and its kernels) runs under it. Above all, it protects the **host from the pod**, not the **pod's credentials from the agent's commands**, because everything in the pod shares gVisor's kernel. It is the right next capability where kernel-exploit risk matters, and it composes with this one: ADR-0021's composition rules allow namespace tools inside a `user-space-kernel` pod, subject to probing.
+- **Option 7 (separate, credential-free gVisor pod per session):** this does meet the threat model: the commands run where the agent's credentials are not, behind a user-space kernel, with no user namespaces on the host. Its costs are a pod start per session, sharing the workspace between the agent's pod and the sandbox pod (which needs shared storage or copying), giving the pack permission to create pods, and re-architecting packs around it; it also needs the same gVisor installation as Option 5. It is a strong candidate once `user-space-kernel` exists, and the [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) project could provide its request layer. It is not chosen first because it depends on that capability and on a larger change to how packs work.
+
+### ADR-0022 evidence: bubblewrap on the host kernel without a filter
+
+An earlier draft of ADR-0022 made this its first implementation; ADR-0022 now records it as an observation only. **It is not a supported NIC setting**: NIC neither publishes nor checks it, because doing so would make running with no syscall filter an endorsed configuration and turn any future `seccompDefault` hardening into a breaking change.
+
+- **Observed on AL2023 (EKS 1.34 x86, 2026-10-19):** with `seccompProfile` unset and the kubelet's `seccompDefault` off (the EKS default), the capability test and both qualified configurations worked and hid environment, home-directory, Secret and service-account-token canaries, the agent's socket and the network. The same pod with `RuntimeDefault` failed. The run also found that the configurations need `/lib64` on x86.
+- **Not working on Hetzner or AKS Ubuntu:** AppArmor's user-namespace restriction and the default container profile block it (Hetzner observed 2026-10-25: `Failed to make / slave: Permission denied`).
+- **Fragile even where it works.** `seccompProfile: RuntimeDefault` is a common chart default and scanner recommendation, and in a JupyterLab-based pack the user's pod is generated by JupyterHub from configuration the extension author may not control; either blocks bubblewrap, whose error ("No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces") points at the wrong cause.
+- **Checks that were designed and dropped with it:** a per-node `nic deploy` check reading `seccompDefault` through `/api/v1/nodes/<node>/proxy/configz` and requiring an AL2023 `osImage`, a provider-reported "expected to allow" flag for `nic validate`, and a published setting "leave `seccompProfile` unset".
+
+**Inside gVisor (the intended first route).** The same qualified configurations, with the network namespace created by `unshare` first, worked under gVisor on a local Ubuntu 24.04 VM (2026-10-17), EKS AL2023 x86 and arm64, and Hetzner Ubuntu 24.04 (2026-10-25), with a pid namespace and a fresh `/proc` showing only the sandbox's processes; Landlock was absent and the pod's seccomp profile ignored. Run-by-run results are recorded with the gVisor evidence in this section.
+
+### ADR-0022: the filtered implementation in full
+
+This is ADR-0022's deferred alternative (Option 4), recorded from an earlier draft and not being pursued; ADR-0022's intended first route is bubblewrap inside gVisor. Were it built, the published seccomp setting for the capability would be a `Localhost` profile and the deploy check would confirm the profile is installed.
+
+**Design.**
+
+1. **Dedicated node groups.** Because bubblewrap runs inside the pack's pod, the pod hosting the agent must itself run on an `in-pod-namespaces` node group, opted in through a per-node-group `sandbox: { capabilities: [in-pod-namespaces] }` block. "Dedicated" means opted in, not necessarily new: an operator can opt in the existing user node group, provided foundational workloads stay off it. Opting in a shared group affects every pod on it: each needs the dedication taint's toleration, so its namespace must be labelled for the capability, and each moves from no filter to `RuntimeDefault` under `seccompDefault`, so it must be tested there. The provider taints the node group `sandbox.nebari.dev/in-pod-namespaces=true:NoSchedule`, following the AWS GPU precedent, and NIC labels its nodes `nebari.dev.node-restriction.kubernetes.io/sandbox-in-pod-namespaces` through the API after registration (ADR-0021: placement labels are never writable by nodes, and kubelets cannot set this prefix). Adding the capability to an existing node group is a node-group replacement. A GPU node group with the capability needs its GPU image qualified separately.
+2. **Boot-time node configuration.** The node's bootstrap writes the profile files into the kubelet's seccomp directory and sets `seccompDefault: true` before the kubelet starts, so replacement and autoscaled nodes are ready when they join, with no installer and no readiness barrier.
+3. **A versioned profile**, `nebari-sandbox-v1`, as described above.
+4. **Admission**, as described above.
+5. **Deploy-time check.** `nic deploy` checks live nodes against the node group's prediction from an image table of qualified images (kernel version and OS image from `node.status.nodeInfo`), reads each sandbox node's configz to confirm `seccompDefault` is on, and reports results in `nic outputs`. A node missing the profile file fails safe: pods that reference it do not start there.
+6. **Pack settings.** Sandboxing pods carry the node selector and toleration, reference the published profile (`seccompProfile: Localhost`, plus an `appArmorProfile` reference on AppArmor nodes once Hetzner is supported), and run in a labelled namespace. The profile applies to the whole container that references it, so a pack can keep the agent in its own container.
+
+**Concrete work.**
+
+- **NIC's EKS module (`terraform-aws-eks-cluster`):** per-node-group bootstrap configuration (a nodeadm `NodeConfig` setting kubelet `seccompDefault`, plus cloud-init writing the profile files), and node-group labels and taints. Today the module uses its pre-nodeadm hook only for the extra CA bundle.
+- **NIC's AWS provider:** plumbing for the `sandbox` block, the image table and profile versions. NIC's EKS node groups already require IMDSv2 with a hop limit of 1 (observed 2026-10-19), so pods cannot reach the instance metadata service and the node's IAM credentials; this must be kept on sandbox node groups (later also enforceable with NetworkPolicy once [#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) lands).
+- **Cluster autoscaler:** confirm scale-from-zero works for tainted, labelled sandbox node groups.
+- **System DaemonSets:** `seccompDefault: true` and the metadata-service hop limit also apply to the VPC CNI, kube-proxy, CSI drivers and monitoring agents on these nodes; each must be tested under `RuntimeDefault` and with hop limit 1 (some components, such as the EBS CSI node plugin depending on its configuration, look up instance metadata), with any needed exceptions documented.
+- **Pack workloads:** the pack's main workload must be tested under `nebari-sandbox-v1` itself, since the profile covers the whole container.
+- **Admission policy, profile files and the image table** in NIC's repository, reviewed as security policy.
+
+**Verification.**
+
+- **Per node image, by hand:** before an image enters the table, a probe confirms the capability test and both qualified consumer configurations work with the profile, a pod without the profile on the same node cannot create a user namespace, netfilter and raw-socket creation fail inside a new user namespace, and Unix sockets on the container's filesystem are not reachable from the qualified configurations.
+- **At deploy:** the consistency check described above.
+- **Consumer acceptance, before the first delivery:** a consumer must show, with the capability in use, that credential canaries in the agent's environment, files and mounted secrets are unreadable by sandboxed commands, inherited descriptors are closed or allowed, networking is denied or limited to the pack's proxy, the instance metadata service is unreachable, its pod settings are correct, and it refuses unsandboxed fallback. Until an upstream pack adopts the capability, a small reference consumer in NIC's user-journey tests fulfils this.
+
+## 20.10 Verification
+
+- **Per node group, then per node.** For `process-self-restriction`, NIC reports each node's kernel baseline when `nic outputs` runs, for diagnosis only, and the probe runs only in maintainers' requalification runs unless automating it is adopted (§20.8). Where probes are used, they run on each node group that should provide a capability, placed with that capability's own selectors and tolerations. For Phase 2, the per-node probe also gates the readiness barrier.
+- **Primitive tests, in both directions.** For `process-self-restriction`: the probe's Landlock cases and the reference launcher's unit and end-to-end tests in §20.8, each denial with a positive control. For `in-pod-namespaces` inside gVisor: the capability test and qualified configurations succeed with the published settings. Filtered implementation (deferred): the qualified invocation succeeds with the profile; a pod without the profile on the same node cannot create a user namespace; netfilter and raw-socket creation fail from inside a new user namespace.
+- **Consumer acceptance test (Gate D).** Separately from the primitive, one real pack must show, with the capability in use:
   - credential canaries placed in the agent's environment, files and mounted secrets are not readable by sandboxed commands;
   - inherited file and socket descriptors are closed or explicitly allowed;
   - networking is denied (or limited to the intended proxy);
@@ -550,18 +688,40 @@ The CI job runs on every pull request to `main`; on a runner below ABI 3 its end
   - when the capability is absent, the pack refuses sandboxed work rather than falling back to running unsandboxed.
 
   This matters because node support alone changes nothing in a pack that, for example, passes credentials in environment variables or launches browsers with `--no-sandbox`.
-- **Scheduled re-verification (later capabilities with components).** Probes also run on a schedule, following the pattern proposed in [#683](https://github.com/nebari-dev/nebari-infrastructure-core/issues/683); a failing node is reported (the readiness record and quarantine in §20.6 are deferred).
+- **Scheduled re-verification.** Probes also run on a schedule, following the pattern proposed in [#683](https://github.com/nebari-dev/nebari-infrastructure-core/issues/683); a failing node is reported (the readiness record and quarantine in §20.6 are deferred).
 - The NetworkPolicy enforcement check proposed in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) uses the same positive/negative pattern, and the two should share their harness.
 
-## 20.10 Security considerations
+## 20.11 Security considerations
 
-`process-self-restriction` relaxes nothing and runs under Pod Security `restricted`. Today, by contrast, pods without a seccomp profile run with no syscall filter at all (confirmed on AWS), and packs that want isolation reach for root, privileged pods or `Unconfined` profiles; a sanctioned, narrower path improves on that.
+`in-pod-namespaces` has three possible delivery settings, and the `seccompDefault` items below must not be read across them. **Inside gVisor** (ADR-0022's intended route) gVisor implements the namespaces and applies its own filter, so neither the host's user-namespace settings nor `seccompDefault` matter. **Unfiltered on AL2023** works only because `seccompDefault` is off and the pod sets no profile; it is recorded as evidence (§20.9), not supported, and nothing below applies to it. **The deferred filtered implementation** permits user namespaces on dedicated host nodes and therefore turns `seccompDefault` **on** there (item 1), so that pods without the NIC profile get `RuntimeDefault` and cannot create namespaces. Items 1–6 apply only to that filtered implementation; `process-self-restriction` relaxes nothing.
 
-Pack-facing documentation states the threat model precisely. `process-self-restriction` shares the host kernel and is not protection against kernel exploits or hostile multi-tenant code. Code an agent executes should be classified by what an adversary can influence (prompt injection, compromised dependencies), not by who owns the pod: a single-tenant deployment does not make that code trusted. The capability is appropriate where a kernel exploit from that code is an acceptable risk; where it is not, a higher boundary level is needed. Packs using seccomp user notification must not rely on a check-then-continue supervisor as their policy mechanism.
+`process-self-restriction` relaxes nothing and runs under Pod Security `restricted`. Today, by contrast, pods without a seccomp profile run with no syscall filter at all (confirmed on AWS), and packs that want isolation reach for root, privileged pods or `Unconfined` profiles; a sanctioned, narrower path improves on that. `in-pod-namespaces` on the host kernel adds real risk, bounded only if:
 
-A later `in-pod-namespaces` capability on the host kernel would add real risk, since permitting unprivileged user namespaces on a node widens its kernel attack surface for every pod there. Its ADR would have to bound that risk, for example with seccomp on by default on its nodes, admission controlling which namespaces may use its profile and nodes, a tested block on netfilter configuration from inside a new user namespace, prompt kernel patching and re-verification of each node.
+1. **Seccomp is on by default on `in-pod-namespaces` nodes.** Once a node permits unprivileged user namespaces, any pod there without a seccomp filter can create them, not only pods that reference the profile. These node groups run the kubelet with `seccompDefault: true`.
+2. **Admission controls who may use the profile and the nodes.** Only namespaces explicitly labelled for the capability may reference `nebari-sandbox-v*` profiles or tolerate the `in-pod-namespaces` dedication taint (never the unverified taint; see the readiness-barrier invariants): through the hardened-mode admission policy (#480) in hardened mode, and a ValidatingAdmissionPolicy shipped with the capability in standard mode.
+3. **The profile operator's API is locked down.** Only NIC and cluster administrators may create or modify `SeccompProfile` or `AppArmorProfile` resources; the operator's images are pinned by digest.
+4. **The netfilter block is concrete and tested** (item 5 of §20.9).
+5. **Kernels on `in-pod-namespaces` node groups are patched promptly**, on a defined cadence with a named owner.
+6. **Readiness is re-verified** at node start (readiness barrier) and on a schedule.
+7. **Pack-facing documentation states the threat model precisely.** Both capabilities share the host kernel and are not protection against kernel exploits or hostile multi-tenant code. Code an agent executes should be classified by what an adversary can influence (prompt injection, compromised dependencies), not by who owns the pod: a single-tenant deployment does not make that code trusted. These capabilities are appropriate where a kernel exploit from that code is an acceptable risk; where it is not, use `user-space-kernel` or `vm-boundary`. Packs using seccomp user notification must not rely on a check-then-continue supervisor as their policy mechanism. With the container's `/proc` reused, sandboxed commands can still see the command lines of other processes in the pod, which can contain credentials, and they inherit whatever environment and descriptors the launcher passes; a fresh user namespace does not by itself let them read another process's environment or follow its `/proc/<pid>/root`, since the kernel's ptrace access checks still apply.
 
-## 20.11 Related work
+## 20.12 Composition and privilege tiers for later capabilities
+
+**Composition.** Which in-pod capabilities are available at a level is recorded as properties of each implementation (§20.6), and validation uses them; this paragraph records how those properties came about. In-pod namespace tools can also run *inside* a `user-space-kernel` or `vm-boundary` workload, where they may obtain namespaces through privileges the outer boundary contains (root, `CAP_SYS_ADMIN`), with no node-level change. On the default runtime the only accepted route is the unprivileged one: `CAP_SYS_ADMIN` on a default-runtime pod is never an accepted way to obtain `in-pod-namespaces`. `process-self-restriction` depends on the kernel the workload actually sees: inside a stronger runtime that is the runtime's kernel, not the node's. gVisor (`release-20261012.0`) does not implement Landlock (`landlock_create_ruleset` returns `ENOSYS`), so `process-self-restriction` does not combine with a gVisor-backed `user-space-kernel`. Conversely, under gVisor a non-root process with no capabilities can create user, mount, IPC, UTS and pid namespaces and mount a fresh procfs, with no node-level change; bubblewrap's own network-namespace setup fails there ([gVisor #13438](https://github.com/google/gvisor/issues/13438)) unless the network namespace is created first (probe, 2026-10-17). Every combination a pack relies on is probed before it is advertised; for example, NetworkPolicy enforcement is checked separately under each stronger runtime, and where a capability's workloads bypass the pod network entirely (for example VMs networked by a host-level process), NetworkPolicy does not apply and that capability's ADR must state how egress is enforced.
+
+**Privilege tiers.** Later capabilities may need more privilege than these two. Each tier is admitted in hardened mode only on the stated terms, and each later capability's ADR must justify its tier against restricted-compatible alternatives, which exist for capable sandbox systems:
+
+| Tier | Example | Terms |
+|---|---|---|
+| Restricted-compatible | `process-self-restriction` | Nothing needed |
+| Capability node agents, non-privileged | Host-management agents that need specific capabilities or host paths but not `privileged: true` (for example a seccomp-only profile installer) | One general exception, pinned to a namespace and to the capability's node groups; enforceable Localhost profiles, never `Unconfined` |
+| Capability node agents, privileged | Runtime installers and other agents that need `privileged: true` | Treated as **host-trusted** exceptions: for privileged containers, Kubernetes runs seccomp unconfined and ignores AppArmor profiles, so a Localhost profile field confines nothing. Pinned to a namespace, an image digest and the capability's node groups, and justified in the capability's ADR |
+| Relaxed workload pods | Worker pods that run a user-space kernel or a VMM themselves, needing added capabilities and relaxed seccomp/AppArmor | Dedicated namespace, exact privileges, confined node groups, set by the capability's ADR; Localhost profiles rather than `Unconfined` |
+| Node-owning systems | Engines that run privileged in host namespaces, mount the host filesystem, or run as root directly on the host | A dedicated, tainted node group treated as a separate trust zone: no other workloads, admission only there and in the system's namespace, no NIC node preparation for other capabilities |
+
+Scale limits are part of a capability's definition: where a provider's system runs on a single node in its open-source form, the capability's ADR says so and packs must not assume horizontal scale.
+
+## 20.13 Related work
 
 **NetworkPolicy enforcement (platform).**
 
@@ -583,7 +743,33 @@ A later `in-pod-namespaces` capability on the host kernel would add real risk, s
 
 - The [Nebari Pack Specification](https://github.com/nebari-dev/nebari-operator/blob/main/docs/pack-specification.md) (section 6, Security baseline) requires a hardened `securityContext` at GA and says packs SHOULD ship a NetworkPolicy. It says nothing about seccomp today. If it later requires `RuntimeDefault`, packs that currently run sandboxing tools with no syscall filter (see "Why it can appear to work today") stop working, so the `sandbox.*` contract here should be referenced from that section.
 
-## 20.12 Alternatives considered in detail
+## 20.14 Future work deferred from ADR-0021
+
+When ADR-0021 was narrowed to `process-self-restriction`, the following consequences and open questions, which apply to `in-pod-namespaces` (§20.9) and later capabilities, moved here. They are inputs to those capabilities' own ADRs.
+
+**Consequences of delivering `in-pod-namespaces`:**
+
+- It depends on external work (an AppArmor mechanism, a hetzner-k3s fix) and may be limited to non-AppArmor node groups for some time.
+- NIC owns a complete seccomp policy per architecture and must track runtime default changes.
+- It needs a new post-bootstrap lifecycle phase in `pkg/nic`, or an ADR-0006 amendment.
+- Enabling user namespaces on dedicated node groups widens the kernel attack surface there.
+
+**Open questions:**
+
+- Gate A: upstream AppArmor support in the Security Profiles Operator, another maintained loader, or AppArmor nodes deferred indefinitely?
+- Post-bootstrap lifecycle hook in `pkg/nic`, or an amendment to ADR-0006?
+- Where the readiness barrier's taint removal runs (a small NIC-owned controller, or the probe DaemonSet itself), and what RBAC it needs to patch nodes.
+- Is per-node-group opt-in the right granularity for AKS and `existing`, where NIC does not own node groups in the same way?
+- Should `in-pod-namespaces` ever cover pods that run sandboxes for several users or sessions? With single-ID user namespaces every session maps to the pod's own host UID, so files are not separated between sessions; separating them needs a distinct real UID per session, which needs root and belongs inside a stronger boundary.
+
+## 20.15 Guidance for later capability ADRs
+
+These decision drivers were part of ADR-0021 when it also covered `in-pod-namespaces`. They no longer bear on the capability ADR-0021 delivers, but apply to the ADRs that will deliver later capabilities:
+
+- **Off by default and narrowly scoped.** Relaxations that later capabilities need, such as unprivileged user namespaces, widen the kernel attack surface (e.g. CVE-2024-1086 was reachable via `CAP_NET_ADMIN` in a user namespace), so they are confined to dedicated node groups.
+- **Prefer community-maintained mechanisms** over NIC-owned node agents, where they can express the required policy.
+
+## 20.16 Alternatives considered in detail
 
 ADR-0021 summarises Options 2, 3, 6 and 7; their full assessment is recorded here.
 
@@ -626,7 +812,7 @@ Install a complete agent-sandbox platform as NIC's sandboxing answer and have pa
 
 Not chosen as the starting point. Because actors are not pods with published settings and the platform runs its own runtime binaries, it cannot provide a level through NIC's mapping; where it can run, it is separately trusted infrastructure on dedicated node groups, close to host root, not an implementation of a level. If packs converge on such a platform, the future `in-pod-namespaces` work can be deprioritised; `process-self-restriction` remains useful either way.
 
-## 20.13 Links
+## 20.17 Links
 
 - [ADR-0003: Software Pack Codegen](../../adr/0003-software-pack-codegen.md)
 - [ADR-0006: Conditional Foundational Software](../../adr/0006-conditional-foundational-software-helm.md)
