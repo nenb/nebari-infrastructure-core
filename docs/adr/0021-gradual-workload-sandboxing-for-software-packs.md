@@ -103,68 +103,59 @@ A later entry might name a `RuntimeClass` that NIC installs (named after the imp
 
 ### Delivered now
 
-**What Landlock gives.** A process can restrict itself and its descendants: which files they may read, write, create or remove; at ABI 4, which TCP ports they may connect to or bind (by port, not address, and not UDP); at ABI 6, signals and abstract Unix sockets outside the sandbox. It does not cover metadata changes such as `chmod`, descriptors already open, or credentials in the environment. Keeping the service-account token out needs a pod setting (`automountServiceAccountToken: false`); no network needs a seccomp filter in the process or, from outside the pod, a later profile.
+**`process-self-restriction`.** A non-root process, with no extra privileges, restricts itself and everything it starts using Landlock: which files they can read or write (Landlock ABI 3 or newer), and which TCP ports they can connect to or listen on (ABI 4 or newer). Landlock doesn't cover UDP, files already open, or credentials already in the environment. So a pack still keeps the service-account token out (`automountServiceAccountToken: false`) and blocks other network access itself, for example with a seccomp filter. The other in-pod capabilities stay reserved.
 
-**`process-self-restriction`.** A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict its own and its descendants' filesystem access with Landlock at ABI 3 or newer, and TCP connect and bind at ABI 4 or newer. Its qualified consumer is the committed probe: in such a pod it applies filesystem and TCP rulesets against positive controls and reports a verdict for each, exiting non-zero if one fails. The reference launcher ([§20.8](../design-doc/implementation/20-workload-sandboxing.md#example-confining-a-command)) is tested on local VMs, containers and in CI, awaiting provider qualification. Nested seccomp user notification is a separate capability, `seccomp-user-notification`, reserved: the probe gives it its own verdict, because container runtime and default-profile changes can break it independently of the kernel.
-
-**Qualification record.** NIC maintainers keep it ([§20.8](../design-doc/implementation/20-workload-sandboxing.md#qualification-record)) by the probe's [requalification procedure](../../tests/sandbox-probe/README.md#requalification). Today:
+**Where it is qualified today:**
 
 | Configuration | Expectation |
 |---|---|
-| `aws`, `AL2023_x86_64_STANDARD`, x86_64, kernel 6.12 (Kubernetes 1.33–1.35), containerd 2.3; probed on 1.34, 2026-10-19 | Qualified, ABI 6 |
-| `hetzner`, Ubuntu 24.04, x86_64, kernel 6.8, containerd 2.2; probed 2026-10-25 | Qualified, ABI 4 |
-| `aws` below 1.33 (kernel 6.1); `azure` below 1.35 (Ubuntu 22.04, 5.15) | Unsupported |
-| Every other combination: other AMI types (ARM, NVIDIA, Bottlerocket), pinned images, AKS from 1.35, `existing`, kind | Unknown |
+| AWS, AL2023 x86_64, kernel 6.12 (Kubernetes 1.33–1.35) | Qualified, Landlock ABI 6 |
+| Hetzner, Ubuntu 24.04 x86_64, kernel 6.8 | Qualified, ABI 4 |
+| AWS below 1.33; Azure below 1.35 | Unsupported (kernel too old) |
+| Everything else (ARM, GPU or Bottlerocket images, AKS from 1.35, `existing`, kind) | Unknown until probed |
 
-An entry covers only the same image variant and architecture, kernel line and container runtime minor version; anything else is unknown until probed.
+**Reporting.** Each cluster provider tells NIC, through `InfraSettings`, what it expects for each node group. `nic outputs`, and the end of `nic deploy`, show that, plus each node's kernel version as a hint. It never fails a deploy, labels nodes or adds configuration.
 
-**Reporting.** Each cluster provider reports in `InfraSettings.Sandbox`, per node group and from config alone, its qualified expectation, plus a diagnostic selector that associates live nodes with the group (not a trusted scheduling label). `nic outputs` shows the expectation per group and, from a fresh read of the nodes when it runs (labelled with the time), the host-kernel baseline: each node's kernel version mapped to the Landlock ABI it introduced upstream. The `default` entry is `qualified` only if every node group that can run pods is, `unsupported` if every one is, and `unknown` otherwise. `nic deploy` prints the same report at its end. NIC labels no nodes for this. Nothing fails, nothing is stored, and the baseline is never treated as a qualification: backports, Landlock built in but not enabled at boot, and runtime seccomp profiles that predate Landlock all defeat it. This ADR adds no configuration.
+The details are in [§20](../design-doc/implementation/20-workload-sandboxing.md): the probe, the example launcher, the full qualification record and how to redo it, the report format, and the test runs of gVisor, Kata and bubblewrap that shaped the contract.
 
 ### What a pack author does
 
-**Today.** Ship the `default` entry's security settings as the chart's defaults. Do not mount the service-account token on pods that run agent commands, and keep credentials out of their environment and files. At startup, read the Landlock ABI and refuse sandboxed work if it is missing or below what the pack needs: this check, not NIC's report, is where the guarantee is enforced. Confine each command, for example as the reference launcher does (an example, not part of the contract): a helper confines itself, refusing if the kernel cannot enforce the whole policy, and then executes the command with a minimal environment and no inherited descriptors. Treat the work directory as untrusted input: files a confined command writes there (`.git/config` with `core.fsmonitor`, `.envrc`, `conftest.py`) run later if the unconfined agent's tools execute them, so run those tools through the launcher too or with hardened invocations.
+**Today.** Ship the `default` security settings as chart defaults. Keep the service-account token and other credentials out of pods that run agent commands. At startup, check the Landlock version and refuse sandboxed work if it's too old. Confine each command (the example launcher shows how). Treat files those commands write as untrusted, since tools that run later outside the sandbox may execute them.
 
-**Next (future work).** A pod that runs untrusted code uses a mapping entry naming a level and a profile, and the pack writes no isolation code.
+**Later.** A pod that runs untrusted code uses a mapping entry naming a level and a profile, and the pack writes no isolation code.
 
 ### Out of scope
 
-- Installing higher-level runtimes, defining profiles (NetworkPolicy enforcement is [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691)) and delivering `seccomp-user-notification`.
-- Creating sandbox pods, which belongs to the pack or a request layer such as [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/).
-- Automatic resolution, including choosing between implementations of one level.
-
-### Evidence from the higher levels
-
-Test-only installs on clusters deployed with NIC (2026-10-19 to 2026-10-27) informed the contract ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#evidence-from-the-higher-levels)). Under gVisor (EKS x86_64 and arm64, Hetzner), Landlock returned `ENOSYS`, the pod's `seccompProfile` was ignored and EFS home directories were not writable; a Kata guest on EKS had Landlock ABI 7 and did not apply `RuntimeDefault`. Hence the acceptance policy, the point that declared settings are not enforcement, and the reserved storage field. Bubblewrap in pods worked only with no seccomp profile, so `in-pod-namespaces` stays reserved. An EKS node rewrote its own node-group label, but not `node-restriction.kubernetes.io/` labels, hence the placement guidance. NetworkPolicy is not enforced on NIC's EKS clusters by default.
+- Installing gVisor or Kata, and defining profiles (which first need NetworkPolicy enforcement, [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691)).
+- Creating sandbox pods: that's the pack's job, or that of a tool such as Agent Sandbox.
+- Choosing a runtime automatically.
 
 ### Security
 
-`process-self-restriction` relaxes nothing and runs under Pod Security `restricted`. It shares the host kernel and is no protection against kernel exploits. Code an agent executes should be treated as attacker-influenced.
+It relaxes nothing and runs under Pod Security `restricted`. It shares the host kernel, so it doesn't protect against kernel exploits.
 
 ### Consequences
 
 **Good:**
 
-- A qualified description of what the default runtime offers, with no relaxation, components or configuration.
-- Packs consume plain values; later levels, capabilities and profiles add entries without breaking them.
+- A tested description of what the cluster's normal runtime offers, with no new components or configuration.
+- Packs get plain values, and later levels, capabilities and profiles can be added without breaking them.
 
 **Bad:**
 
-- Most configurations are unknown until probed, and older kernels do not qualify.
-- `nic deploy` does not block an incompatible cluster, and NIC does not steer pods away from node groups that do not qualify; packs rely on their startup check.
-- The baseline is an inference, and nodes added later are not seen.
-- Maintainers keep the qualification record current.
-- The mapping is versioned before a second entry exists, and pack integration is manual until ADR-0003.
+- Most configurations are unknown until someone probes them, and older kernels don't qualify.
+- NIC doesn't block a deploy or steer pods away from unsuitable nodes; packs rely on their startup check.
+- Maintainers must keep the qualification record up to date.
+- The mapping is versioned before it has a second entry, and wiring values into packs is manual until ADR-0003.
 
 ## Options Detail
 
-- **Option 1 (do less):** good practice that NIC follows (documentation, the reference launcher, concrete class names, Agent Sandbox for lifecycle), but packs cannot choose node images, install runtimes or rely on CNI enforcement, so each would rediscover what each cluster offers. The thin contract adds the shared, qualified description.
-- **Options 2 and 3 (labels from an image table, Node Feature Discovery):** components or tables for steering that buys little, without confirming Landlock is active.
-- **Option 4 (chosen):** usable now with no relaxation, cheap and tool-independent; its shape is set before a second entry exists.
-- **Option 5 (one tool):** no path to stronger isolation.
-- **Option 6 (a stronger runtime only):** needs provider-specific installation and adds overhead and compatibility gaps; kept as the reserved levels.
-- **Option 7 (a full sandbox platform):** Agent Substrate (v0.6.0, pre-1.0) runs its own runtimes from root worker pods; it is not qualified or supported by NIC, and would be separately trusted infrastructure, not an implementation of a level.
-
-The full assessment of Options 2, 3, 6 and 7 is in the design doc ([§20](../design-doc/implementation/20-workload-sandboxing.md#option-2-node-group-labels-from-an-image-table)).
+- **Option 1 (do less):** NIC does all of this anyway (docs, example launcher, runtime names, Agent Sandbox). Without a shared description, though, every pack has to work out separately what each cluster supports.
+- **Options 2 and 3 (image-table labels, Node Feature Discovery):** extra components or tables to steer pods, which help little and still don't confirm Landlock is switched on.
+- **Option 4 (chosen):** usable now, cheap, nothing relaxed, not tied to one tool.
+- **Option 5 (one tool):** no route to stronger isolation.
+- **Option 6 (gVisor or Kata only):** needs installing per provider, adds overhead and breaks some workloads; kept as the reserved levels.
+- **Option 7 (full sandbox platform):** Agent Substrate is pre-1.0, runs its own runtimes from privileged pods, and would be a separate system to trust rather than a level NIC provides.
 
 ## Open Questions
 
