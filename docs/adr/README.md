@@ -29,6 +29,7 @@ An ADR is a document that captures an important architectural decision made alon
 | [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md) | Workload Sandboxing Capability Contract for Software Packs | Proposed | 2026-10-12 |
 | [ADR-0022](0022-in-pod-namespaces-capability.md) | In-Pod Namespace Sandboxes (`in-pod-namespaces`) for Software Packs | Proposed (exploratory) | 2026-10-15 |
 | [ADR-0023](0023-user-space-kernel-capability.md) | User-Space Kernel Sandboxes (`user-space-kernel`) with gVisor | Proposed (exploratory) | 2026-10-19 |
+| [ADR-0024](0024-immutable-node-pool-rollouts.md) | Immutable Node-Pool Rollouts | Proposed (exploratory) | 2026-10-27 |
 
 ## ADR Statuses
 
