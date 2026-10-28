@@ -19,6 +19,7 @@ For each namespace in `sandbox.untrusted_execution.namespaces`, NIC creates (or,
 | `ValidatingAdmissionPolicy` `nic-untrusted-execution-netpol` | NetworkPolicy rules (22.4) |
 | Default ServiceAccount with `automountServiceAccountToken: false` | Belt and braces; the admission policy is the guarantee |
 | `LimitRange` `nic-sandbox-defaults` and `ResourceQuota` `nic-sandbox-quota` | Default and maximum CPU, memory and ephemeral storage per container; namespace totals (22.11) |
+| In a credential namespace only: `Role` `nic-credential-controller` and a `RoleBinding` to the ServiceAccount named in `credential_controllers` | Grants creating, reading and deleting Secrets, pods and the workload objects that create pods (Jobs, Deployments, Agent Sandbox's resources) to that controller alone; NIC binds no other role in the namespace (22.3) |
 
 Cluster-wide, once per cluster that uses the profile:
 
@@ -38,11 +39,12 @@ Rejected in an untrusted-execution namespace, on create and update:
 - no `runtimeClassName` (above `shared-kernel`), or one whose `RuntimeClass` lacks a `sandbox.nebari.dev/level` label at or above the profile's level;
 - any ephemeral container (the policy matches `pods` and `pods/ephemeralcontainers`; matching only `pods` let an ephemeral container read a Secret into a running sandbox pod, 22.10);
 - `automountServiceAccountToken` not explicitly `false` (pod or ServiceAccount), or a projected service-account token volume;
-- Secret volumes, projected Secrets, `env.valueFrom.secretKeyRef` or `envFrom.secretRef`, with no exception;
+- Secret volumes, projected Secrets, `env.valueFrom.secretKeyRef` or `envFrom.secretRef`, except in a credential namespace (below), where a projected service-account token is still rejected;
 - inline `csi` volumes: a CSI driver can request the pod's service-account token or fetch secrets for the pod regardless of `automountServiceAccountToken`;
 - `hostPath` volumes, `hostNetwork`, `hostPID`, `hostIPC`, `privileged: true`, added capabilities beyond the container runtime's defaults, device resources, `procMount: Unmasked`, unsafe sysctls;
 - on update, any added toleration (Kubernetes lets a pod's tolerations grow after creation, which would otherwise bypass the pool rule);
-- at `shared-kernel`, anything Pod Security `restricted` rejects, including running as root.
+- at `shared-kernel`, anything Pod Security `restricted` rejects, including running as root;
+- for a bare pod, or a pod whose controlling owner reference names a Job, no `activeDeadlineSeconds` or one above `max_pod_lifetime` (Job pods set it in the pod template). Pods whose controlling owner is any other kind are exempt (22.11). The exemption keys on the owner reference, which whoever creates the pod sets, so it guards against a pack forgetting a deadline, not against a pack evading it; the pack's controller is trusted.
 
 PersistentVolumeClaims in these namespaces may not set `spec.volumeName`: binding a claim to an existing PersistentVolume by name could hand a sandbox another workload's data.
 
@@ -50,7 +52,13 @@ The runtime class applies to the whole pod, so trusted helpers (the agent, a pro
 
 Allowed: running as UID 0 above `shared-kernel`, the runtime's default capabilities, writable root file systems, `emptyDir`, PVCs, ConfigMaps.
 
-**Session material without an exception.** An earlier draft admitted Secrets labelled as session capabilities (an SSH host key, an authorised key); since a pack can label any Secret it creates, that was an open door, and it is gone. Session material is delivered without it: public material (an authorised key, a CA certificate) through ConfigMaps; private material generated inside the sandbox at start (an SSH host key, whose public half the pack reads back through a channel it already trusts, such as the pod's log through the API) or sent over the session channel after it opens.
+**Per-pod credentials in a credential namespace.** Controllers that create sandbox pods legitimately deliver a short-lived credential per pod: a run token the pod uses to call a broker, or to authenticate to its controller. Ambient credentials stay prohibited everywhere: service-account tokens (automounted or projected), host paths, and Secrets shared across pods or namespaces. A pod may mount a Secret only in a namespace listed in `credential_controllers`, which names the one ServiceAccount allowed to create Secrets and pods there.
+
+- **What carries the guarantee.** Admission cannot tell who created a Secret that a pod refers to, nor whether another pod uses it, so the guarantee rests on the namespace's RBAC. NIC sets that RBAC up (22.2) rather than auditing every binding in the cluster, because it already creates and owns these namespaces and a setup is simpler and deterministic. RBAC is additive: cluster-wide grants (cluster administrators, or a ClusterRole a pack binds to all namespaces) are outside it, and whether `nic deploy` should report them is an open question in ADR-0025.
+- **Trust model.** The controller is trusted; the code inside its pods is not. The controller must scope each Secret to one pod or run (for example one Secret per pod, deleted with it through an owner reference), keep it short-lived, and never place the platform's or other workloads' credentials in the namespace. Packs should prefer brokering, a proxy outside the pod that adds credentials, wherever they can: a credential inside the sandbox can be read and exfiltrated through any route the sandbox has.
+- **Everything else is unchanged.** Default-deny networking, the remaining admission rules and the lifetime rule apply in credential namespaces as in any other.
+
+**Session material without a labelled exception.** An earlier draft admitted Secrets labelled as session capabilities (an SSH host key, an authorised key); since a pack can label any Secret it creates, that was an open door, and it stays removed. Outside a credential namespace, session material is delivered without Secrets: public material (an authorised key, a CA certificate) through ConfigMaps; private material generated inside the sandbox at start (an SSH host key, whose public half the pack reads back through a channel it already trusts, such as the pod's log through the API) or sent over the session channel after it opens. In a credential namespace, the controller may instead deliver it as a per-pod Secret.
 
 ## 22.4 NetworkPolicy admission rules
 
@@ -88,7 +96,7 @@ For each namespace and each listed runtime, `nic deploy` starts a short-lived ro
 7. the pod's boundary level shows (ADR-0021's diagnostic: above `shared-kernel` the kernel release inside differs from the node's, with evidence specific to the implementation);
 8. in strict mode, a connection attempted in the pod's first second fails rather than succeeds.
 
-It also submits, with server-side dry run, a pod without a qualifying runtime class, a pod mounting a Secret, a pod with an inline CSI volume, an ephemeral container, an update adding a toleration, a runc pod tolerating a sandbox pool's taint, a PVC naming an existing PersistentVolume, a NetworkPolicy with an external `ipBlock` and one selecting a namespace by label, each of which must be rejected. The probe is a diagnostic of the path it exercised, not attestation. Any failure fails the deploy; the probe objects are deleted afterwards.
+It also submits, with server-side dry run, a pod without a qualifying runtime class, a pod mounting a Secret outside a credential namespace, a pod with a projected service-account token inside one, a bare pod without `activeDeadlineSeconds` and one above the maximum, a pod with an inline CSI volume, an ephemeral container, an update adding a toleration, a runc pod tolerating a sandbox pool's taint, a PVC naming an existing PersistentVolume, a NetworkPolicy with an external `ipBlock` and one selecting a namespace by label, each of which must be rejected, and a pod owned by a Deployment's ReplicaSet with no deadline, which must be admitted. In each credential namespace it checks with `SubjectAccessReview`s that the declared controller can create Secrets and pods there and that the namespace's default ServiceAccount and those of the peer namespaces cannot. The probe is a diagnostic of the path it exercised, not attestation. Any failure fails the deploy; the probe objects are deleted afterwards.
 
 ## 22.7 Verification checklist
 
@@ -99,6 +107,8 @@ Per provider, before it is listed as supporting the profile:
 - a sandbox pod's HTTP traffic through a proxy in another namespace succeeding, and the same request sent directly failing;
 - the admission rules against each rejected pattern in 22.3 and 22.4, on create and on update;
 - session material delivered as in 22.3 (a host key generated in the sandbox and pinned by the agent);
+- in a credential namespace, a per-pod Secret created by the declared controller mounted by its pod, and Secret creation by any other ServiceAccount in the namespace or a peer namespace refused (to be verified);
+- the lifetime rule: a bare pod and a Job pod above the maximum rejected, and an Agent Sandbox warm pool and a Deployment-owned pod admitted and recreated normally (to be verified);
 - a tool-execution workload as root under each runtime: SSH commands and SFTP to a PVC-backed workspace (observed on EKS under gVisor and Kata, 22.10); package installs, compilers and Git (to be verified);
 - node-local reachability tests repeated after a node replacement and a CNI upgrade;
 - the start-up window measured on each provider, and strict mode enabled on EKS without breaking any NIC namespace;
@@ -112,7 +122,9 @@ Per provider, before it is listed as supporting the profile:
 - **A NIC-owned request layer or egress gateway:** see ADR-0025, options 4 and 5.
 - **Admitting sandbox platforms by loosening the sandbox-pod rules:** any loosening applies to every pod in the namespace.
 - **A sandbox-platform profile with a declared privilege envelope and a claimed boundary level** (an earlier draft): dropped after review. NIC cannot verify a platform's isolation, so a claimed level adds a name without a guarantee, and the envelope's privileges place the platform close to host root; see 22.9.
-- **An exception for labelled session Secrets:** packs can label their own Secrets; see 22.3.
+- **An exception for labelled session Secrets:** packs can label their own Secrets; see 22.3. Per-pod Secrets are allowed only where namespace RBAC confines who creates them.
+- **Auditing every RBAC binding instead of setting up the namespace's own:** more work for NIC for a guarantee that still excludes cluster administrators; see 22.3.
+- **A lifetime cap on every pod:** controllers recreate the pods they own and warm pools keep pods alive by design, so a cap on them either fails or churns; it applies to bare and Job pods only (22.11).
 
 ## 22.9 Future integration: sandbox platforms
 
@@ -136,7 +148,7 @@ Its own security table marks per-actor network isolation, zero ambient credentia
 
 ### Where it would fit
 
-An earlier draft gave platforms a second profile: dedicated pools, an exact privilege envelope for workers and the node agent, and a boundary level the platform claimed and NIC recorded as unverified. Review dropped it. Actors are not pods with published settings, so NIC cannot check the isolation between them or the runtime the worker starts; the worker and node-agent privileges above (root, `SYS_ADMIN`, unconfined profiles, host paths) put the platform close to host root on its nodes; and a claimed level is a name without a guarantee. Such a platform is separately trusted infrastructure. If one runs on a NIC provider, its integration is its own decision; the useful parts NIC already has are dedicated, tainted pools, enforced NetworkPolicy at the pool boundary and unreachable metadata, and KVM-capable node groups without NIC's Kata install for a microVM class. Agent Sandbox, by contrast, creates ordinary pods and is a consumer of this profile: it should be qualified with an unmodified `SandboxTemplate`, checking its mandatory `activeDeadlineSeconds` against warm pools and controller recreation, and whether its templates create `ipBlock` policies, which the profile rejects.
+An earlier draft gave platforms a second profile: dedicated pools, an exact privilege envelope for workers and the node agent, and a boundary level the platform claimed and NIC recorded as unverified. Review dropped it. Actors are not pods with published settings, so NIC cannot check the isolation between them or the runtime the worker starts; the worker and node-agent privileges above (root, `SYS_ADMIN`, unconfined profiles, host paths) put the platform close to host root on its nodes; and a claimed level is a name without a guarantee. Such a platform is separately trusted infrastructure. If one runs on a NIC provider, its integration is its own decision; the useful parts NIC already has are dedicated, tainted pools, enforced NetworkPolicy at the pool boundary and unreachable metadata, and KVM-capable node groups without NIC's Kata install for a microVM class. Agent Sandbox, by contrast, creates ordinary pods and is a consumer of this profile: it should be qualified with an unmodified `SandboxTemplate`, checking that its controller-owned pods and warm pools fall under the lifetime exemption (22.11), how it delivers any per-pod credential (a credential namespace, 22.3), and whether its templates create `ipBlock` policies, which the profile rejects.
 
 ### What has to change before Agent Substrate runs on NIC
 
@@ -176,7 +188,7 @@ EKS 1.34 in us-east-1 deployed with NIC from `main`; probe groups `gv` (m6i.larg
 | Processes per pod | kubelet `podPidsLimit`, node-level: on EKS in the sandbox group's `nodeadm` `NodeConfig` (`kubelet.config.podPidsLimit`); on k3s through the pool's kubelet arguments (`--kubelet-arg=pod-max-pids=<n>`). Proposed default 4096 | NIC, on sandbox node groups; applies to every pod on them, which on dedicated pools are sandboxes and node agents |
 | CPU, memory, ephemeral storage per container | `LimitRange` defaults and maxima in each namespace; the admission policy rejects containers above the maxima | NIC sets defaults; packs size pods within them |
 | Namespace totals | `ResourceQuota` (CPU, memory, ephemeral storage, pods, PVCs and requested storage) | NIC, from operator values |
-| Lifetime | Admission requires `activeDeadlineSeconds` no longer than the configured maximum (proposed 24 h) | Packs set it; NIC enforces the maximum |
+| Lifetime | Bare pods and Job pods: admission requires `activeDeadlineSeconds` no longer than the configured maximum (proposed 24 h). Pods owned by another controller (Deployments, StatefulSets, Agent Sandbox's controllers) are exempt, since such controllers recreate pods and warm pools keep them alive by design | Packs set the deadline and NIC enforces the maximum; for controller-owned pods the pack's controller enforces lifetime and idle clean-up itself and states it in its trust model, which NIC's pack documentation requires |
 
 Ephemeral-storage limits evict a pod that fills its node's disk; PVC-backed workspaces are bounded by their requested size and the quota. Node-level values are part of what the sandbox node groups boot with, so changing the process cap replaces nodes. To be verified: that the process cap applies inside gVisor and Kata pods as on runc (gVisor's sandbox and Kata's VM processes are counted in the pod's cgroup on the host, but the limit seen by code inside may differ).
 
