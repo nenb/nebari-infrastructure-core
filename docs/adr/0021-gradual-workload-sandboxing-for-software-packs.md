@@ -32,17 +32,19 @@ Software packs increasingly run code nobody has reviewed line by line, such as c
 
 ## Considered Options
 
-1. Do less: document supported node environments, maintain a fail-closed launcher, pass concrete `RuntimeClass` names as Helm values, treat NetworkPolicy as general infrastructure work and leave lifecycle to Agent Sandbox.
-2. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
-3. A tool-neutral contract with a published mapping of concrete values, starting with a qualified description of Landlock on the default runtime.
-4. Go straight to a stronger-isolation runtime (gVisor or Kata) as the only option.
-5. Adopt a full sandbox platform (e.g. Agent Substrate).
-6. Detect the capability per node with Node Feature Discovery.
-7. Label qualifying node groups from a NIC-maintained table of node images.
+Listed from least to most work for NIC.
+
+1. Do less: document which node setups work, maintain an example launcher that refuses to run when it cannot confine, let operators give packs the exact runtime name to use (a `RuntimeClass`, such as `nebari-gvisor`) as a Helm value, treat NetworkPolicy as general infrastructure work, and leave sandbox lifecycle to Agent Sandbox.
+2. Label qualifying node groups from a NIC-maintained table of node images.
+3. Detect the capability per node with Node Feature Discovery.
+4. A tool-neutral contract with a published mapping of concrete values, starting with a qualified description of Landlock on the default runtime.
+5. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
+6. Go straight to a stronger-isolation runtime (gVisor or Kata) as the only option.
+7. Adopt a full sandbox platform (e.g. Agent Substrate).
 
 ## Decision Outcome
 
-Chosen option: "Option 3". This ADR fixes the contract below and delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox: enforcement is the consumer's. NIC reports an incompatible cluster but does not block `nic deploy`; the pack's startup check refuses sandboxed work instead. An operator option that makes a requirement fail the deploy may be added later without changing the mapping.
+Chosen option: "Option 4". This ADR fixes the contract below and delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox: enforcement is the consumer's. NIC reports an incompatible cluster but does not block `nic deploy`; the pack's startup check refuses sandboxed work instead. An operator option that makes a requirement fail the deploy may be added later without changing the mapping.
 
 The contract gives NIC a shared vocabulary for "what sandboxing this cluster supports", and ready-made settings for packs. Packs then ask for a kind of protection, not a specific tool, and the cluster's options can grow (for example adding gVisor or Kata) without packs having to change.
 
@@ -99,15 +101,15 @@ A later entry might name a `RuntimeClass` that NIC installs (named after the imp
 - **Prove before promising.** Nothing is promised for a configuration until it is qualified.
 - **State a trust model.** Every later level, capability or profile says who is trusted, what hostile code may do, what NIC enforces, what the pack must enforce, and what is not covered.
 
-Later ADRs that add runtimes should also follow the guidance in [§20.6](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/docs/design-doc/implementation/20-workload-sandboxing.md#guidance-for-later-capabilities) on placement labels, versioning and admission.
+Later ADRs that add runtimes should also follow the guidance in [§20.6](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/docs/design-doc/implementation/20-workload-sandboxing.md#guidance-for-later-capabilities) on placement labels, versioning and admission.
 
 ### Delivered now
 
 **What Landlock gives.** A process can restrict itself and its descendants: which files they may read, write, create or remove; at ABI 4, which TCP ports they may connect to or bind (by port, not address, and not UDP); at ABI 6, signals and abstract Unix sockets outside the sandbox. It does not cover metadata changes such as `chmod`, descriptors already open, or credentials in the environment. Keeping the service-account token out needs a pod setting (`automountServiceAccountToken: false`); no network needs a seccomp filter in the process or, from outside the pod, a later profile.
 
-**`process-self-restriction`.** A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict its own and its descendants' filesystem access with Landlock at ABI 3 or newer, and TCP connect and bind at ABI 4 or newer. Its qualified consumer is the sandbox probe: in such a pod it applies filesystem and TCP rulesets against positive controls and reports a verdict for each, exiting non-zero if one fails. The reference launcher ([§20.8](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/docs/design-doc/implementation/20-workload-sandboxing.md#example-confining-a-command)) is tested on local VMs, containers and in CI, awaiting provider qualification. Nested seccomp user notification is a separate capability, `seccomp-user-notification`, reserved: the probe gives it its own verdict, because container runtime and default-profile changes can break it independently of the kernel.
+**`process-self-restriction`.** A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict its own and its descendants' filesystem access with Landlock at ABI 3 or newer, and TCP connect and bind at ABI 4 or newer. Its qualified consumer is the sandbox probe: in such a pod it applies filesystem and TCP rulesets against positive controls and reports a verdict for each, exiting non-zero if one fails. The reference launcher ([§20.8](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/docs/design-doc/implementation/20-workload-sandboxing.md#example-confining-a-command)) is tested on local VMs, containers and in CI, awaiting provider qualification. Nested seccomp user notification is a separate capability, `seccomp-user-notification`, reserved: the probe gives it its own verdict, because container runtime and default-profile changes can break it independently of the kernel.
 
-**Qualification record.** NIC maintainers keep it ([§20.8](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/docs/design-doc/implementation/20-workload-sandboxing.md#qualification-record)) by the probe's [requalification procedure](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/tests/sandbox-probe/README.md#requalification). Today:
+**Qualification record.** NIC maintainers keep it ([§20.8](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/docs/design-doc/implementation/20-workload-sandboxing.md#qualification-record)) by the probe's [requalification procedure](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/tests/sandbox-probe/README.md#requalification). Today:
 
 | Configuration | Expectation |
 |---|---|
@@ -134,7 +136,7 @@ An entry covers only the same image variant and architecture, kernel line and co
 
 ### Evidence from the higher levels
 
-Test-only installs on clusters deployed with NIC (2026-10-19 to 2026-10-27) informed the contract ([§20.6](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/docs/design-doc/implementation/20-workload-sandboxing.md#evidence-from-the-higher-levels)). Under gVisor (EKS x86_64 and arm64, Hetzner), Landlock returned `ENOSYS`, the pod's `seccompProfile` was ignored and EFS home directories were not writable; a Kata guest on EKS had Landlock ABI 7 and did not apply `RuntimeDefault`. Hence the acceptance policy, the point that declared settings are not enforcement, and the reserved storage field. Bubblewrap in pods worked only with no seccomp profile, so `in-pod-namespaces` stays reserved. An EKS node rewrote its own node-group label, but not `node-restriction.kubernetes.io/` labels, hence the placement guidance. NetworkPolicy is not enforced on NIC's EKS clusters by default.
+Test-only installs on clusters deployed with NIC (2026-10-19 to 2026-10-27) informed the contract ([§20.6](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/docs/design-doc/implementation/20-workload-sandboxing.md#evidence-from-the-higher-levels)). Under gVisor (EKS x86_64 and arm64, Hetzner), Landlock returned `ENOSYS`, the pod's `seccompProfile` was ignored and EFS home directories were not writable; a Kata guest on EKS had Landlock ABI 7 and did not apply `RuntimeDefault`. Hence the acceptance policy, the point that declared settings are not enforcement, and the reserved storage field. Bubblewrap in pods worked only with no seccomp profile, so `in-pod-namespaces` stays reserved. An EKS node rewrote its own node-group label, but not `node-restriction.kubernetes.io/` labels, hence the placement guidance. NetworkPolicy is not enforced on NIC's EKS clusters by default.
 
 ### Security
 
@@ -158,13 +160,13 @@ Test-only installs on clusters deployed with NIC (2026-10-19 to 2026-10-27) info
 ## Options Detail
 
 - **Option 1 (do less):** good practice that NIC follows (documentation, the reference launcher, concrete class names, Agent Sandbox for lifecycle), but packs cannot choose node images, install runtimes or rely on CNI enforcement, so each would rediscover what each cluster offers. The thin contract adds the shared, qualified description.
-- **Option 2 (one tool):** no path to stronger isolation.
-- **Option 3 (chosen):** usable now with no relaxation, cheap and tool-independent; its shape is set before a second entry exists.
-- **Option 4 (a stronger runtime only):** needs provider-specific installation and adds overhead and compatibility gaps; kept as the reserved levels.
-- **Option 5 (a full sandbox platform):** Agent Substrate (v0.6.0, pre-1.0) runs its own runtimes from root worker pods; it is not qualified or supported by NIC, and would be separately trusted infrastructure, not an implementation of a level.
-- **Options 6 and 7 (Node Feature Discovery, labels from an image table):** components or tables for steering that buys little, without confirming Landlock is active.
+- **Options 2 and 3 (labels from an image table, Node Feature Discovery):** components or tables for steering that buys little, without confirming Landlock is active.
+- **Option 4 (chosen):** usable now with no relaxation, cheap and tool-independent; its shape is set before a second entry exists.
+- **Option 5 (one tool):** no path to stronger isolation.
+- **Option 6 (a stronger runtime only):** needs provider-specific installation and adds overhead and compatibility gaps; kept as the reserved levels.
+- **Option 7 (a full sandbox platform):** Agent Substrate (v0.6.0, pre-1.0) runs its own runtimes from root worker pods; it is not qualified or supported by NIC, and would be separately trusted infrastructure, not an implementation of a level.
 
-The full assessment of Options 4, 5 and 7 is in the design doc ([§20](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/docs/design-doc/implementation/20-workload-sandboxing.md#option-4-stronger-isolation-runtime-only-gvisor-or-kata)).
+The full assessment of Options 2, 3, 6 and 7 is in the design doc ([§20](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/docs/design-doc/implementation/20-workload-sandboxing.md#option-2-node-group-labels-from-an-image-table)).
 
 ## Open Questions
 
@@ -176,8 +178,8 @@ The full assessment of Options 4, 5 and 7 is in the design doc ([§20](https://g
 
 The supporting design doc and the sandbox probe below are linked at a fixed commit on the author's fork; they are proposed for this repository together with the implementation, not with this ADR.
 
-- [Design doc: Workload Sandboxing (fork, fixed commit)](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/docs/design-doc/implementation/20-workload-sandboxing.md)
-- [Sandbox probe and reference launcher (fork, fixed commit)](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/tests/sandbox-probe/README.md)
+- [Design doc: Workload Sandboxing (fork, fixed commit)](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/docs/design-doc/implementation/20-workload-sandboxing.md)
+- [Sandbox probe and reference launcher (fork, fixed commit)](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/tests/sandbox-probe/README.md)
 - [ADR-0003: Software Pack Codegen](0003-software-pack-codegen.md)
 - [ADR-0010: High-Security Mode](0010-high-security-mode.md)
 - [Trail of Bits: VMs won't contain cyber-capable agents](https://blog.trailofbits.com/2026/08/26/vms-wont-contain-cyber-capable-agents/)
