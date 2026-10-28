@@ -42,7 +42,7 @@ Chosen option: "Option 2", because it delivers a guest-kernel boundary through t
 
 ### The implementation
 
-**`vm-boundary`** is an implementation family of ADR-0021's **`hardware-virtualised`** level: a pod that sets the level's published `RuntimeClass` runs inside its own virtual machine with its own guest kernel, isolated from the host by hardware virtualisation. Kata Containers is its first implementation. Under ADR-0021's ordering rule, a stronger level satisfies an operator's `mediated-kernel` policy, but satisfies a requirement set only where Kata has every property the set needs. ADR-0021 builds no choice between two qualifying implementations, so offering gVisor and Kata for the same set on one provider needs that choice decided first.
+**`vm-boundary`** is an implementation family of ADR-0021's **`hardware-virtualised`** level: a pod that uses its `RuntimeClass` (`nebari-kata`, or Azure's class on AKS) runs inside its own virtual machine with its own guest kernel, isolated from the host by hardware virtualisation. Kata Containers is its first implementation. Under ADR-0021's ordering rule, a stronger level satisfies an operator's `mediated-kernel` policy, but satisfies a requirement set only where Kata has every property the set needs. ADR-0021 builds no choice between two qualifying implementations, so offering gVisor and Kata for the same set on one provider needs that choice decided first.
 
 **Two implementations, qualified separately.** Kata installed by NIC on AWS (QEMU) and AKS Pod Sandboxing (a different VMM and guest, managed by Azure) are separate implementations of the level. Properties established for one are not carried over to the other; the table below is for AWS only, and AKS has none until it is probed.
 
