@@ -72,7 +72,7 @@ Detailed implementation specifications and technical designs.
     Namespace profile for pods that run agents' tool calls: enforced default-deny networking, admission rules, a minimum boundary level, deploy probe, consumer guide for coding agents (design behind the exploratory ADR-0025)
 
 23. **[VM Boundary](implementation/23-vm-boundary.md)**
-    Kata Containers on AWS nested-virtualisation or bare-metal node groups and AKS Pod Sandboxing (design behind ADR-0026)
+    Kata Containers on AWS nested-virtualisation or bare-metal node groups and AKS Pod Sandboxing (design behind the exploratory ADR-0026)
 
 ### Operations
 

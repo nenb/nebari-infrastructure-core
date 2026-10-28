@@ -8,25 +8,25 @@ Mechanisms for [ADR-0026](../../adr/0026-vm-boundary-capability.md). Each is a d
 |---|---|---|
 | AWS, nested virtualisation | Managed node group with a custom launch template setting `CpuOptions.NestedVirtualization=enabled` on a supported family; Kata installed at boot | Observed (23.7): 7th- and 8th-generation Intel families from `.large` (166 types in us-east-1, listed by `describe-instance-types` filtered on `processor-info.supported-features=nested-virtualization`); `/dev/kvm` on the AL2023 EKS node; Kata 4.2.0 runs. Other regions and performance against bare metal to be verified |
 | AWS, bare metal | A `.metal` family; Kata installed at boot | Fallback; no launch-template CPU option needed |
-| AKS | Pod Sandboxing on an Azure Linux node pool; Azure's runtime class | To be verified against NIC's AKS module |
+| AKS | Pod Sandboxing on an Azure Linux node pool; Azure's runtime class | A separate implementation (its own VMM and guest, managed by Azure); nothing qualified on AWS carries over. Not yet probed, including against NIC's AKS module |
 | Hetzner Cloud | None (no nested virtualisation) | Unsupported; a cloud VM per sandbox outside Kubernetes is the alternative |
 | `existing`, kind | Operator's runtime | Verification only, as in ADR-0023 |
 
 ## 23.2 AWS installation
 
-Follows ADR-0023's boot sequence (§20, "Boot-step dependency order"), with these differences:
+Mirrors the boot sequence sketched for ADR-0023 (§20, "Boot-step dependency order"), with these differences:
 
-1. Before installing, the boot step checks that `/dev/kvm` exists and is usable; if not, the node labels itself `"false"` with reason `no-kvm`.
+1. Before installing, the boot step checks that `/dev/kvm` exists and is usable; if not, the node reports failure (`sandbox.nebari.dev/kata: failed`, reason `no-kvm`) and is never labelled for placement.
 2. NIC's artifact contains the Kata runtime and shim (`containerd-shim-kata-v2`), the guest kernel and guest image, and the VMM, with a per-file list, verified as ADR-0023's is.
 3. The containerd handler `kata` uses `runtime_type = "io.containerd.kata.v2"`, with the Kata configuration in the release directory.
-4. The node check runs a test pod sandbox through the CRI with handler `kata` and checks that `uname -r` inside differs from the host's, that the guest sees a hypervisor (the CPU's hypervisor flag), that it runs as root inside, and that it can write to an `emptyDir`.
-5. NIC creates the level's `RuntimeClass` itself, with a node selector and a toleration for the dedicated taint; the class kata-deploy creates (`kata-qemu-runtime-rs`, overhead 320Mi/250m) has a node selector but no toleration for a custom taint.
+4. The node check runs a test pod sandbox through the CRI with handler `kata` and checks Kata-specific evidence: `uname -r` inside equals the pinned Kata guest kernel's release, and `/sys/class/dmi/id` identifies NIC's VMM (QEMU) rather than the EC2 instance type. The hypervisor CPU flag is not evidence: EC2 nodes show it, so a gVisor pod on EC2 sees it too. It also checks that the pod runs as root inside and can write to an `emptyDir`.
+5. NIC creates `RuntimeClass` `nebari-kata` itself, labelled `sandbox.nebari.dev/level: hardware-virtualised`, selecting `node-restriction.kubernetes.io/nebari-sandbox-kata` (set by the cluster-side labeller after verification, never by the node) and tolerating the dedicated taint; the class kata-deploy creates (`kata-qemu-runtime-rs`, overhead 320Mi/250m) has a node selector but no toleration for a custom taint.
 
-The launch template's CPU option, the instance family and the Kata, VMM and guest-kernel versions are part of the generation spec (ADR-0024), so changing any of them is a rollout.
+The launch template's CPU option, the instance family and the Kata, VMM and guest-kernel versions are part of what the group boots with, so changing any of them replaces nodes, under the lifecycle invariants stated in ADR-0023.
 
 ## 23.3 AKS
 
-NIC's AKS module creates a node pool with Pod Sandboxing enabled (the node pool's workload runtime, on Azure Linux; field names to be verified) and NIC publishes Azure's runtime class name, as in ADR-0023's verification-only mode for the class itself. NIC still labels the pool, runs the node and deploy checks, and applies ADR-0025's profile, which on AKS requires the Cilium dataplane (#691).
+NIC's AKS module creates a node pool with Pod Sandboxing enabled (the node pool's workload runtime, on Azure Linux; field names to be verified) and NIC publishes Azure's runtime class name in the requirement mapping. Azure owns the runtime's installation and version: NIC declares it as a separate implementation, with its own properties established by a probe on AKS, and observes it with the deploy check, without implying control. ADR-0025's profile on AKS requires the Cilium dataplane (#691).
 
 ## 23.4 Memory, start time and storage
 
@@ -39,13 +39,15 @@ NIC's AKS module creates a node pool with Pod Sandboxing enabled (the node pool'
 Per instance family, node image and Kata release:
 
 - `/dev/kvm` present and the node check passing on fresh and autoscaled nodes, including scale-from-zero;
-- a node without virtualisation (wrong family) labelling itself `"false"` with `no-kvm`, and gVisor-style failure handling otherwise;
+- a node without virtualisation (wrong family) reporting `no-kvm` and never labelled for placement, and gVisor-style failure handling otherwise;
+- the Kata-specific evidence passing under Kata and failing for a gVisor pod and a runc pod on the same instance family;
 - guest kernel differing from the host's; root inside the VM; package installs, compilers and Git as root;
 - ADR-0025's deploy probe under the VM runtime;
 - PVC-backed workspaces on each supported storage class with real ownership;
 - memory under a limit with the configured overhead, and pod start time;
 - `process-self-restriction` inside the guest (observed: Landlock ABI 7, ADR-0021's probe passed) and `in-pod-namespaces` (not yet probed);
-- an ADR-0024 rollout changing the Kata release.
+- a Kata release change by node replacement, with a deliberately broken release leaving pods Pending;
+- on AKS, the same list run separately, with nothing assumed from AWS.
 
 ## 23.6 Rejected alternatives
 
