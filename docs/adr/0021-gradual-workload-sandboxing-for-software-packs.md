@@ -34,15 +34,13 @@ Software packs increasingly run code nobody has reviewed line by line, such as c
 
 Listed from least to most work for NIC.
 
-1. **Do less:** document which node setups work, maintain an example launcher, let operators give packs the exact runtime name (a `RuntimeClass`) as a Helm value, treat NetworkPolicy as general infrastructure work, and leave sandbox lifecycle to Agent Sandbox. *NIC does all of this anyway, but without a shared description every pack has to work out separately what each cluster supports.*
-2. **Label qualifying node groups** from a NIC-maintained table of node images. *A table to maintain for steering that helps little, and it doesn't confirm Landlock is switched on.*
-3. **Detect the capability per node** with Node Feature Discovery. *An extra component with the same limits as 2.*
-4. **A tool-neutral contract** with a published mapping of concrete values, starting with a tested description of Landlock on the normal runtime. *Chosen: usable now, cheap, nothing relaxed, not tied to one tool.*
-5. **Bake in one sandboxing tool** (e.g. bubblewrap). *No route to stronger isolation.*
-6. **Go straight to gVisor or Kata** as the only option. *Needs installing per provider, adds overhead and breaks some workloads; kept as the reserved levels.*
-7. **Adopt a full sandbox platform** (e.g. Agent Substrate). *Pre-1.0, runs its own runtimes from privileged pods, and would be a separate system to trust rather than a level NIC provides.*
-
-The full assessment of options 2, 3, 6 and 7 is in [§20](../design-doc/implementation/20-workload-sandboxing.md#option-2-node-group-labels-from-an-image-table).
+1. Do less: document which node setups work, maintain an example launcher, let operators give packs the exact runtime name (a `RuntimeClass`) as a Helm value, treat NetworkPolicy as general infrastructure work, and leave sandbox lifecycle to Agent Sandbox.
+2. Label qualifying node groups from a NIC-maintained table of node images.
+3. Detect the capability per node with Node Feature Discovery.
+4. A tool-neutral contract with a published mapping of concrete values, starting with a tested description of Landlock on the normal runtime.
+5. Bake in one sandboxing tool (e.g. bubblewrap).
+6. Go straight to gVisor or Kata as the only option.
+7. Adopt a full sandbox platform (e.g. Agent Substrate).
 
 ## Decision Outcome
 
@@ -149,6 +147,38 @@ It relaxes nothing and runs under Pod Security `restricted`. It shares the host 
 - NIC doesn't block a deploy or steer pods away from unsuitable nodes; packs rely on their startup check.
 - Maintainers must keep the qualification record up to date.
 - The mapping is versioned before it has a second entry, and wiring values into packs is manual until ADR-0003.
+
+## Options Detail
+
+### Option 1: Do less
+
+NIC does all of this anyway, but without a shared description every pack has to work out separately what each cluster supports.
+
+### Option 2: Label node groups from an image table
+
+A table to maintain for steering that helps little, and it doesn't confirm Landlock is switched on.
+
+### Option 3: Node Feature Discovery
+
+An extra component with the same limits as 2.
+
+### Option 4: Tool-neutral contract (chosen)
+
+Usable now, cheap, nothing relaxed, not tied to one tool.
+
+### Option 5: One sandboxing tool
+
+No route to stronger isolation.
+
+### Option 6: gVisor or Kata only
+
+Needs installing per provider, adds overhead and breaks some workloads; kept as the reserved levels.
+
+### Option 7: Full sandbox platform
+
+Pre-1.0, runs its own runtimes from privileged pods, and would be a separate system to trust rather than a level NIC provides.
+
+The full assessment of options 2, 3, 6 and 7 is in [§20](../design-doc/implementation/20-workload-sandboxing.md#option-2-node-group-labels-from-an-image-table).
 
 ## Open Questions
 
