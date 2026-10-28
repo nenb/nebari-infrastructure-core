@@ -1,19 +1,44 @@
 package main
 
-const probeVersion = "0.1.0"
+const probeVersion = "0.2.0"
 
 type probeResult struct {
-	ProbeVersion      string              `json:"probe_version"`
-	Node              string              `json:"node"`
-	Kernel            string              `json:"kernel"`
-	Arch              string              `json:"arch"`
-	SeccompMode       int                 `json:"seccomp_mode"`
-	SeccompFilters    int                 `json:"seccomp_filters"`
-	NoNewPrivs        bool                `json:"no_new_privs"`
-	Landlock          landlockResult      `json:"landlock"`
-	SeccompNotify     seccompNotifyResult `json:"seccomp_notify"`
-	CapabilityVerdict string              `json:"capability_verdict"`
-	Errors            []string            `json:"errors"`
+	ProbeVersion   string              `json:"probe_version"`
+	Node           string              `json:"node"`
+	Kernel         string              `json:"kernel"`
+	Arch           string              `json:"arch"`
+	SeccompMode    int                 `json:"seccomp_mode"`
+	SeccompFilters int                 `json:"seccomp_filters"`
+	NoNewPrivs     bool                `json:"no_new_privs"`
+	Landlock       landlockResult      `json:"landlock"`
+	SeccompNotify  seccompNotifyResult `json:"seccomp_notify"`
+	Verdicts       verdicts            `json:"verdicts"`
+	// VerdictsDerivedBy is set when the verdicts were recomputed from a
+	// recorded result's raw fields by a later probe version (--rederive).
+	VerdictsDerivedBy string   `json:"verdicts_derived_by,omitempty"`
+	Errors            []string `json:"errors"`
+}
+
+// Verdict values.
+const (
+	verdictPass          = "pass"
+	verdictFail          = "fail"
+	verdictNotApplicable = "not_applicable"
+)
+
+// verdicts are evaluated separately, so one property failing never hides or
+// decides another.
+type verdicts struct {
+	// LandlockFS: filesystem restriction at ABI 3 or newer, with controls.
+	LandlockFS string `json:"landlock_fs"`
+	// LandlockTCP: TCP connect and bind restriction. Evaluated at ABI 4 or
+	// newer, where the record advertises TCP confinement; not_applicable below.
+	LandlockTCP string `json:"landlock_tcp"`
+	// SeccompUserNotification: the separate, reserved capability.
+	SeccompUserNotification string `json:"seccomp_user_notification"`
+	// ProcessSelfRestriction: landlock_fs passes and landlock_tcp does not
+	// fail. It does not depend on seccomp user notification.
+	ProcessSelfRestriction string `json:"process_self_restriction"`
 }
 
 type landlockResult struct {
@@ -87,22 +112,67 @@ func emptyProbeResult() probeResult {
 			AddfdSend:            "not_run",
 			MarkerRead:           "not_run",
 		},
-		CapabilityVerdict: "fail",
+		Verdicts: verdicts{
+			LandlockFS:              verdictFail,
+			LandlockTCP:             verdictFail,
+			SeccompUserNotification: verdictFail,
+			ProcessSelfRestriction:  verdictFail,
+		},
 	}
 }
 
-func capabilityPass(result probeResult) bool {
-	fs := result.Landlock.FS
+func unsupportedOSResult(arch string) probeResult {
+	result := emptyProbeResult()
+	result.Arch = arch
+	result.Landlock.Status = "unsupported_os"
+	result.Errors = append(result.Errors, "the sandbox probe must run on Linux")
+	result.Verdicts = deriveVerdicts(result)
+	return result
+}
+
+func verdict(pass bool) string {
+	if pass {
+		return verdictPass
+	}
+	return verdictFail
+}
+
+// deriveVerdicts computes every verdict from the raw fields alone, so a
+// recorded result can be re-evaluated deterministically.
+func deriveVerdicts(result probeResult) verdicts {
+	landlock := result.Landlock
+	fs := landlock.FS
+	net := landlock.Net
 	seccomp := result.SeccompNotify
-	return result.Landlock.Status == "enabled" &&
-		result.Landlock.ABI >= 3 &&
+	enabled := landlock.Status == "enabled"
+
+	var out verdicts
+	out.LandlockFS = verdict(enabled &&
+		landlock.ABI >= 3 &&
+		fs.Error == "" &&
 		fs.ControlOK &&
 		fs.AllowedWrite == "ok" &&
 		fs.DeniedWrite == "EACCES" &&
-		fs.DeniedTruncate == "EACCES" &&
+		fs.DeniedTruncate == "EACCES")
+	if enabled && landlock.ABI < 4 {
+		out.LandlockTCP = verdictNotApplicable
+	} else {
+		// A forbidden connect or bind that succeeded, a probe error or a
+		// check that never ran all fail.
+		out.LandlockTCP = verdict(enabled &&
+			net.Error == "" &&
+			net.ControlOK &&
+			net.AllowedConnect == "ok" &&
+			net.DeniedConnect == "EACCES" &&
+			net.Bind == "EACCES")
+	}
+	out.SeccompUserNotification = verdict(seccomp.Error == "" &&
 		seccomp.StackedFilters == "ok" &&
 		seccomp.ListenerTransfer == "ok" &&
 		seccomp.NotificationReceived == "ok" &&
 		seccomp.AddfdSend == "ok" &&
-		seccomp.MarkerRead == "ok"
+		seccomp.MarkerRead == "ok")
+	out.ProcessSelfRestriction = verdict(out.LandlockFS == verdictPass &&
+		out.LandlockTCP != verdictFail)
+	return out
 }

@@ -13,14 +13,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func execute(args []string) (probeResult, bool) {
-	if len(args) > 0 && strings.HasPrefix(args[0], "--child=") {
-		runChild(args)
-		return probeResult{}, false
-	}
-	return runProbe(), true
-}
-
 func runProbe() probeResult {
 	result := emptyProbeResult()
 	result.Node = os.Getenv("NODE_NAME")
@@ -58,12 +50,14 @@ func runProbe() probeResult {
 		fs, fsErr := runLandlockFSProbe(abi)
 		result.Landlock.FS = fs
 		if fsErr != nil {
+			result.Landlock.FS.Error = fsErr.Error()
 			result.Errors = append(result.Errors, fmt.Sprintf("Landlock filesystem probe: %v", fsErr))
 		}
 		if abi >= 4 {
 			network, networkErr := runLandlockNetProbe()
 			result.Landlock.Net = network
 			if networkErr != nil {
+				result.Landlock.Net.Error = networkErr.Error()
 				result.Errors = append(result.Errors, fmt.Sprintf("Landlock network probe: %v", networkErr))
 			}
 		} else {
@@ -74,12 +68,11 @@ func runProbe() probeResult {
 	seccomp, err := runSeccompNotifyProbe()
 	result.SeccompNotify = seccomp
 	if err != nil {
+		result.SeccompNotify.Error = err.Error()
 		result.Errors = append(result.Errors, fmt.Sprintf("seccomp notification probe: %v", err))
 	}
 
-	if capabilityPass(result) {
-		result.CapabilityVerdict = "pass"
-	}
+	result.Verdicts = deriveVerdicts(result)
 	return result
 }
 
