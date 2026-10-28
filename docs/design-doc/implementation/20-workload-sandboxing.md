@@ -99,6 +99,7 @@ ADR-0021 states the contract on three independent axes: an ordered **boundary le
 |---|---|---|
 | `no-service-account-token` | Admission: `automountServiceAccountToken: false` and no projected token volume | Tokens copied into images, files or environment values |
 | `no-secret-references` | Admission: no `secretKeyRef`, `secretRef` or Secret volumes | Literal values in the pod spec, ConfigMaps, images, data |
+| `controller-scoped-secrets-only` (ADR-0025 sketch, in namespaces that allow per-pod controller credentials, instead of `no-secret-references`) | Namespace RBAC NIC sets up: only the named controller may create Secrets and pods there | Cluster-wide grants; what the controller puts in each Secret |
 | `metadata-unreachable` | Network policy and node settings (for example IMDS hop limit 1) | Other in-cluster credential services |
 | `default-deny-off-pod-egress` | Enforced NetworkPolicy | Loopback and sidecars in the pod; traffic to the pod's own node, which the tested policies did not block; policies a request layer creates |
 
