@@ -138,7 +138,7 @@ Test-only installs on clusters deployed with NIC (2026-10-19 to 2026-10-27) info
 - **Option 5 (a full sandbox platform):** Agent Substrate (v0.6.0, pre-1.0) runs its own runtimes from root worker pods; it is not qualified or supported by NIC, and would be separately trusted infrastructure, not an implementation of a level.
 - **Options 6 and 7 (Node Feature Discovery, labels from an image table):** components or tables for steering that buys little, without confirming Landlock is active.
 
-The full assessment of Options 4, 5 and 7 is in the design doc ([§20.12](../design-doc/implementation/20-workload-sandboxing.md#2012-alternatives-considered-in-detail)).
+The full assessment of Options 4, 5 and 7 is in the design doc ([§20](../design-doc/implementation/20-workload-sandboxing.md#option-4-stronger-isolation-runtime-only-gvisor-or-kata)).
 
 ## Open Questions
 
