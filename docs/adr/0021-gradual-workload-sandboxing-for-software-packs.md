@@ -63,18 +63,11 @@ A later entry might name a `RuntimeClass` that NIC installs (named after the imp
 
 **Rules.**
 
-- **(a) Fail loudly.** A requirement is met, **failed** (tried and did not hold), **unsupported** (known not to hold) or **unverified** (not known). None of the last three falls back to weaker settings; a pack that cannot establish its sandbox refuses the work.
-- **(b) Prove before promising.** A level, capability, implementation or profile is promised for a configuration only after a maintainer has tested it there with a named, working consumer (for `process-self-restriction`, the committed [probe](../../tests/sandbox-probe/README.md)) and recorded it in the qualification record.
-- **(c) Every addition states a trust model:** who is trusted, what hostile code may do, what NIC enforces, what the pack must enforce, and what is not covered.
-- **(d) Settings are not enforcement, and tests are diagnostics, not attestation.** The tested gVisor and Kata configurations ignored the pod's `seccompProfile`; a check that passes shows one path worked for one pod at one time.
+- **Fail closed.** If a pack cannot establish its sandbox, it refuses the work; it never falls back to weaker settings.
+- **Prove before promising.** Nothing is promised for a configuration until it is qualified.
+- **State a trust model.** Every later level, capability or profile says who is trusted, what hostile code may do, what NIC enforces, what the pack must enforce, and what is not covered.
 
-### Guidance for later capabilities
-
-These are not part of the contract; [§20.6](../design-doc/implementation/20-workload-sandboxing.md#guidance-for-later-capabilities) has the detail.
-
-- **Placement labels.** For runtimes NIC installs, labels that route pods use a NIC-owned prefix kubelets cannot set (`nebari.dev.node-restriction.kubernetes.io/`). This stops only self-asserted eligibility through kubelet credentials, and its preconditions (Node authorizer, NodeRestriction, scoped kubelet identities) are verified per provider. Provider-managed runtimes are routed and trusted as the provider's.
-- **Lifecycle.** Incompatible changes to a capability or profile definition need a new version. Implementations and releases can be added, withdrawn or revoked behind a stable class name. Availability is not permanent support, and guarantees must hold on every eligible placement, including mixed-version rollouts.
-- **Admission.** A `ValidatingAdmissionPolicy` cannot read a `RuntimeClass`'s labels, so restricting runtimes uses a NIC-generated list of approved class names or a webhook.
+Later ADRs that add runtimes should also follow the guidance in [§20.6](../design-doc/implementation/20-workload-sandboxing.md#guidance-for-later-capabilities) on placement labels, versioning and admission.
 
 ## Context
 
@@ -141,7 +134,7 @@ An entry covers only the same image variant and architecture, kernel line and co
 
 ### Evidence from the higher levels
 
-Test-only installs on clusters deployed with NIC (2026-10-19 to 2026-10-27) informed the contract ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#evidence-from-the-higher-levels)). Under gVisor (EKS x86_64 and arm64, Hetzner), Landlock returned `ENOSYS`, the pod's `seccompProfile` was ignored and EFS home directories were not writable; a Kata guest on EKS had Landlock ABI 7 and did not apply `RuntimeDefault`. Hence the acceptance policy, rule (d) and the reserved storage field. Bubblewrap in pods worked only with no seccomp profile, so `in-pod-namespaces` stays reserved. An EKS node rewrote its own node-group label, but not `node-restriction.kubernetes.io/` labels, hence the placement guidance. NetworkPolicy is not enforced on NIC's EKS clusters by default.
+Test-only installs on clusters deployed with NIC (2026-10-19 to 2026-10-27) informed the contract ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#evidence-from-the-higher-levels)). Under gVisor (EKS x86_64 and arm64, Hetzner), Landlock returned `ENOSYS`, the pod's `seccompProfile` was ignored and EFS home directories were not writable; a Kata guest on EKS had Landlock ABI 7 and did not apply `RuntimeDefault`. Hence the acceptance policy, the point that declared settings are not enforcement, and the reserved storage field. Bubblewrap in pods worked only with no seccomp profile, so `in-pod-namespaces` stays reserved. An EKS node rewrote its own node-group label, but not `node-restriction.kubernetes.io/` labels, hence the placement guidance. NetworkPolicy is not enforced on NIC's EKS clusters by default.
 
 ### Security
 
