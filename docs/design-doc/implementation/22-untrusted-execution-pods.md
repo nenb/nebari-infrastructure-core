@@ -4,7 +4,7 @@ Mechanisms for [ADR-0025](../../adr/0025-untrusted-execution-pods.md). Each is a
 
 ## 22.1 The pattern
 
-An agent runs in a trusted pod that holds its model and integration credentials. Its tool calls run in a separate sandbox pod, usually one per session, reached over SSH (with a per-session key and a host key pinned in advance) or `kubectl exec`. The sandbox pod holds the workspace and no real credentials; outbound HTTP goes through the pack's proxy, which checks the destination and injects credentials outside the sandbox. NIC's role is everything around the sandbox pod: runtime, placement, admission and enforced network rules.
+An agent runs in its own pod that holds its model and integration credentials; that pod reads model output and tool results, so it is exposed to prompt injection and trusted only to hold credentials. Its tool calls run in a separate sandbox pod, usually one per session, reached over SSH (with a per-session key and a host key pinned in advance) or `kubectl exec`. The sandbox pod holds the workspace and no real credentials; outbound HTTP goes through the pack's proxy, which checks the destination and injects credentials outside the sandbox, so the proxy's policy decides what authority the sandbox has. NIC's role is everything around the sandbox pod: runtime, placement, admission and enforced network rules.
 
 ## 22.2 Namespace profile
 
@@ -13,9 +13,9 @@ For each namespace in `sandbox.untrusted_execution.namespaces`, NIC creates (or,
 | Object | Purpose |
 |---|---|
 | Namespace label `sandbox.nebari.dev/untrusted-execution: "true"` | Selects the admission policies and the profile's probes |
-| Pod Security labels `enforce: baseline` | Root allowed; host namespaces, privileged and host paths refused |
+| Pod Security labels `enforce: baseline` (`restricted` when the profile's level is `shared-kernel`) | Root allowed above `shared-kernel`; host namespaces, privileged and host paths refused |
 | NetworkPolicy `nic-default-deny` (`podSelector: {}`, `policyTypes: [Ingress, Egress]`) | Default deny in both directions |
-| `ValidatingAdmissionPolicy` `nic-untrusted-execution-pods` | Pod rules (22.3) |
+| `ValidatingAdmissionPolicy` `nic-untrusted-execution-pods` | Pod and PVC rules (22.3), on create and update |
 | `ValidatingAdmissionPolicy` `nic-untrusted-execution-netpol` | NetworkPolicy rules (22.4) |
 | Default ServiceAccount with `automountServiceAccountToken: false` | Belt and braces; the admission policy is the guarantee |
 | `LimitRange` `nic-sandbox-defaults` and `ResourceQuota` `nic-sandbox-quota` | Default and maximum CPU, memory and ephemeral storage per container; namespace totals (22.11) |
@@ -24,36 +24,43 @@ Cluster-wide, once per cluster that uses the profile:
 
 | Object | Purpose |
 |---|---|
-| `ValidatingAdmissionPolicy` `nic-sandbox-pool-tolerations` | Allows a toleration for a sandbox pool's taint (explicit, or a blanket `operator: Exists`) only for pods using a sandbox level's `RuntimeClass`; `kube-system` and NIC's node-level DaemonSets exempt. A taint alone let a runc pod that added the toleration run on a gVisor node (22.10) |
-| On AWS, the `vpc-cni` add-on's `configuration_values`: `enableNetworkPolicy: "true"` and `env.NETWORK_POLICY_ENFORCING_MODE: strict` | Enforcement with no window at pod start; NIC's EKS module sets neither today, and a later `nic deploy` leaves hand-set values in place without guaranteeing them |
+| `ValidatingAdmissionPolicy` `nic-sandbox-pool-tolerations` | On create and update, allows a toleration for a sandbox pool's taint (explicit, or a blanket `operator: Exists`) only for pods using a `RuntimeClass` with a `sandbox.nebari.dev/level` label; `kube-system` and NIC's node-level DaemonSets exempt. A taint alone let a runc pod that added the toleration run on a gVisor node (22.10) |
+| On AWS, the `vpc-cni` add-on's `configuration_values`: `enableNetworkPolicy: "true"` and `env.NETWORK_POLICY_ENFORCING_MODE: strict` | Enforcement with no window at pod start; NIC's EKS module sets neither today, and a later `nic deploy` leaves hand-set values in place without guaranteeing them. Strict mode is cluster-wide: every new pod is denied all traffic until a policy selects it, so NIC must first ship a NetworkPolicy for every namespace it manages (foundational services and packs), as the #675 trial found |
+| Pod Security `enforce: restricted` on each namespace in `peer_namespaces` | Trusted pods that mount a sandbox's workspace run with `allowPrivilegeEscalation: false`, so setuid files planted by root in a sandbox on `no_root_squash` storage give them nothing |
 | A host-side rule on sandbox node groups, written at boot, dropping traffic from pod addresses to the node's own addresses | The CNI's policy does not cover a pod's traffic to its own node (22.10); the mechanism (an nftables rule in the node's boot steps on AWS and k3s) is to be qualified, including that the kubelet's and CNI's own traffic to pods is unaffected |
 
 NIC owns these objects, labels them as NIC-managed, and fails the deploy if it cannot create or update them, as for ADR-0023's resources. Removing a namespace from the list stops NIC managing it but deletes nothing.
 
-A platform's worker namespace (22.9) gets the same objects, with Pod Security `privileged` (the envelope policy, not Pod Security, is the limit there), an extra `ValidatingAdmissionPolicy` `nic-platform-envelope-<name>` and its binding, and a taint `sandbox.nebari.dev/platform=<name>:NoSchedule` on the platform's node groups.
-
 ## 22.3 Pod admission rules
 
-Rejected in an untrusted-execution namespace:
+Rejected in an untrusted-execution namespace, on create and update:
 
-- no `runtimeClassName`, or one that is not the published class of the profile's boundary level or a stronger one;
+- no `runtimeClassName` (above `shared-kernel`), or one whose `RuntimeClass` lacks a `sandbox.nebari.dev/level` label at or above the profile's level;
 - any ephemeral container (the policy matches `pods` and `pods/ephemeralcontainers`; matching only `pods` let an ephemeral container read a Secret into a running sandbox pod, 22.10);
 - `automountServiceAccountToken` not explicitly `false` (pod or ServiceAccount), or a projected service-account token volume;
-- Secret volumes, projected Secrets, `env.valueFrom.secretKeyRef` or `envFrom.secretRef`, except Secrets labelled `sandbox.nebari.dev/session-capability: "true"`;
-- `hostPath` volumes, `hostNetwork`, `hostPID`, `hostIPC`, `privileged: true`, added capabilities beyond the container runtime's defaults.
+- Secret volumes, projected Secrets, `env.valueFrom.secretKeyRef` or `envFrom.secretRef`, with no exception;
+- inline `csi` volumes: a CSI driver can request the pod's service-account token or fetch secrets for the pod regardless of `automountServiceAccountToken`;
+- `hostPath` volumes, `hostNetwork`, `hostPID`, `hostIPC`, `privileged: true`, added capabilities beyond the container runtime's defaults, device resources, `procMount: Unmasked`, unsafe sysctls;
+- on update, any added toleration (Kubernetes lets a pod's tolerations grow after creation, which would otherwise bypass the pool rule);
+- at `shared-kernel`, anything Pod Security `restricted` rejects, including running as root.
+
+PersistentVolumeClaims in these namespaces may not set `spec.volumeName`: binding a claim to an existing PersistentVolume by name could hand a sandbox another workload's data.
 
 The runtime class applies to the whole pod, so trusted helpers (the agent, a proxy) must never be containers in a sandbox pod: under a VM runtime they would share its VM, and under any runtime its network rules.
 
-Allowed: running as UID 0, the runtime's default capabilities, writable root file systems, `emptyDir`, PVCs, ConfigMaps (for public material such as authorized keys).
+Allowed: running as UID 0 above `shared-kernel`, the runtime's default capabilities, writable root file systems, `emptyDir`, PVCs, ConfigMaps.
+
+**Session material without an exception.** An earlier draft admitted Secrets labelled as session capabilities (an SSH host key, an authorised key); since a pack can label any Secret it creates, that was an open door, and it is gone. Session material is delivered without it: public material (an authorised key, a CA certificate) through ConfigMaps; private material generated inside the sandbox at start (an SSH host key, whose public half the pack reads back through a channel it already trusts, such as the pod's log through the API) or sent over the session channel after it opens.
 
 ## 22.4 NetworkPolicy admission rules
 
 NetworkPolicies other than NIC's own in these namespaces may only:
 
-- allow egress to pods selected by `podSelector` and `namespaceSelector` (for example the pack's proxy namespace), and to the cluster DNS service if the pack declares it;
-- allow ingress from pods selected the same way (the agent's pods, for SSH or exec traffic).
+- allow egress to pods in a namespace listed in `peer_namespaces`, selected by `kubernetes.io/metadata.name` (which only the API server sets), so a pack cannot extend the list by labelling a namespace;
+- allow ingress from pods selected the same way (the agent's pods, for SSH);
+- allow egress to the cluster DNS service on port 53, only when `allow_dns` is set.
 
-Rejected: any `ipBlock` (egress or ingress), and empty selectors that would match every namespace. Because NetworkPolicies are additive, this is what prevents a pack's allow-all from undoing the default deny.
+Rejected: any `ipBlock` (egress or ingress), selectors that match namespaces by any other label, and empty selectors that would match every namespace. Because NetworkPolicies are additive, this is what prevents a pack's allow-all from undoing the default deny. DNS is denied by default because a sandbox using an explicit proxy needs none and queries are an exfiltration channel.
 
 ## 22.5 Enforcement per provider
 
@@ -66,22 +73,22 @@ Rejected: any `ipBlock` (egress or ingress), and empty selectors that would matc
 
 `InfraSettings.Sandbox` reports whether the provider enforces NetworkPolicy, and `nic validate` rejects the profile where it does not. The deploy probe (22.6) is the evidence; configuration is never taken as proof.
 
-**Start-up window.** In the VPC CNI's default `standard` mode, each new pod could connect directly for its first 1.0–1.4 s before its policy applied. In `strict` mode no direct connection succeeded, and the pod's allowed routes (the proxy, DNS) opened 1.4–1.8 s after start. NIC uses strict mode, and packs' sandboxes retry their first connections rather than failing. The window on k3s is to be measured.
+**Start-up window.** In the VPC CNI's default `standard` mode, each new pod could connect directly for its first 1.0–1.4 s before its policy applied. In `strict` mode no direct connection succeeded, and the pod's allowed routes (the proxy, DNS) opened 1.4–1.8 s after start. NIC uses strict mode, and packs' sandboxes retry their first connections rather than failing. The window on k3s is to be measured, and the profile is not offered on Hetzner until it has been: provider qualification is a delivery gate, as is a working rule for own-node traffic.
 
 ## 22.6 Deploy-time probe
 
 For each namespace and each listed runtime, `nic deploy` starts a short-lived root pod from an image NIC publishes, plus a NIC test target in a separate namespace with a label the probe's own NetworkPolicy allows. The probe must observe:
 
-1. external egress (an IP and a hostname) fails;
-2. the allowed test target is reachable and a second, non-allowed target is not;
+1. external egress (an IP and a hostname) fails, and so does DNS when `allow_dns` is not set;
+2. a test target in a peer namespace is reachable and a target in a namespace outside `peer_namespaces` is not, even when a policy selects it by label;
 3. `169.254.169.254` (and the provider's other metadata addresses) is unreachable;
 4. the node's own addresses on the kubelet port and a NodePort are unreachable;
 5. the Kubernetes API service address is unreachable;
 6. no service-account token exists at the usual path;
-7. the pod's boundary level holds (ADR-0021: the kernel release inside differs from the node's, and for `hardware-virtualised` the pod sees a hypervisor);
+7. the pod's boundary level shows (ADR-0021's diagnostic: above `shared-kernel` the kernel release inside differs from the node's, with evidence specific to the implementation);
 8. in strict mode, a connection attempted in the pod's first second fails rather than succeeds.
 
-It also submits, with server-side dry run, a pod without a runtime class, a pod mounting a Secret, an ephemeral container, a runc pod tolerating a sandbox pool's taint and a NetworkPolicy with an external `ipBlock`, each of which must be rejected. Any failure fails the deploy; the probe objects are deleted afterwards.
+It also submits, with server-side dry run, a pod without a qualifying runtime class, a pod mounting a Secret, a pod with an inline CSI volume, an ephemeral container, an update adding a toleration, a runc pod tolerating a sandbox pool's taint, a PVC naming an existing PersistentVolume, a NetworkPolicy with an external `ipBlock` and one selecting a namespace by label, each of which must be rejected. The probe is a diagnostic of the path it exercised, not attestation. Any failure fails the deploy; the probe objects are deleted afterwards.
 
 ## 22.7 Verification checklist
 
@@ -90,10 +97,12 @@ Per provider, before it is listed as supporting the profile:
 - every step of the deploy probe, under gVisor and (where supported) the VM runtime, with the probe running as root;
 - an SSH session from an agent pod in another namespace to a sandbox pod, allowed by the pack's ingress policy, and refused from a pod without the label;
 - a sandbox pod's HTTP traffic through a proxy in another namespace succeeding, and the same request sent directly failing;
-- the admission rules against each rejected pattern in 22.3 and 22.4, and a labelled session-capability Secret accepted;
+- the admission rules against each rejected pattern in 22.3 and 22.4, on create and on update;
+- session material delivered as in 22.3 (a host key generated in the sandbox and pinned by the agent);
 - a tool-execution workload as root under each runtime: SSH commands and SFTP to a PVC-backed workspace (observed on EKS under gVisor and Kata, 22.10); package installs, compilers and Git (to be verified);
 - node-local reachability tests repeated after a node replacement and a CNI upgrade;
-- for each sandbox-platform envelope: a worker pod within it admitted, each field exceeded by one step rejected, a non-platform pod on the platform's nodes rejected, and the network probe passing from a pod holding `NET_ADMIN` that tries to change its own routes and nftables rules.
+- the start-up window measured on each provider, and strict mode enabled on EKS without breaking any NIC namespace;
+- a pod in a peer namespace with `allowPrivilegeEscalation: true` rejected.
 
 ## 22.8 Rejected alternatives
 
@@ -101,12 +110,13 @@ Per provider, before it is listed as supporting the profile:
 - **Pod Security `restricted` for sandbox namespaces:** forbids root, which tool execution needs; the runtime is the boundary instead.
 - **In-pod network restrictions for sandboxes:** root inside the pod can undo them.
 - **A NIC-owned request layer or egress gateway:** see ADR-0025, options 4 and 5.
-- **Admitting sandbox platforms by loosening the sandbox-pod rules:** any loosening applies to every pod in the namespace; the envelope applies only to declared service accounts on dedicated nodes.
-- **Running a platform's workers under NIC's gVisor `RuntimeClass`:** the workers start `runsc` or a VMM themselves, which a gVisor pod cannot do; nesting is unsupported by the platform and would double the runtime.
+- **Admitting sandbox platforms by loosening the sandbox-pod rules:** any loosening applies to every pod in the namespace.
+- **A sandbox-platform profile with a declared privilege envelope and a claimed boundary level** (an earlier draft): dropped after review. NIC cannot verify a platform's isolation, so a claimed level adds a name without a guarantee, and the envelope's privileges place the platform close to host root; see 22.9.
+- **An exception for labelled session Secrets:** packs can label their own Secrets; see 22.3.
 
-## 22.9 Sandbox platforms
+## 22.9 Future integration: sandbox platforms
 
-Facts are from Agent Substrate v0.6.0 (released 2026-10-22; repository created 2026-05; tags v0.2.0 to v0.6.0 in five months), read from its source and documentation, and from Agent Sandbox v1.0.8 (2026-10-22). Both projects move quickly; the envelope below must be re-read for each release.
+Background for ADR-0025's "Future integration" note; nothing here is part of the profile. Facts are from Agent Substrate v0.6.0 (released 2026-10-22; repository created 2026-05; tags v0.2.0 to v0.6.0 in five months), read from its source and documentation, and from Agent Sandbox v1.0.8 (2026-10-22). Both projects move quickly; the envelope below must be re-read for each release.
 
 ### Two shapes
 
@@ -124,30 +134,9 @@ Facts are from Agent Substrate v0.6.0 (released 2026-10-22; repository created 2
 
 Its own security table marks per-actor network isolation, zero ambient credentials and fail-closed egress as met, and node blast-radius containment, the delete guarantee and atespace network policy as in progress; a second security boundary between co-located actors is a roadmap goal.
 
-### Fit with ADR-0021 to ADR-0026
+### Where it would fit
 
-- **ADR-0021's contract.** Actors are not pods with published settings, so NIC cannot verify a platform's boundary level. The platform may claim one, which NIC records and shows as claimed, not verified. Packs built on it depend on the platform's own API.
-- **ADR-0023 (gVisor).** Not used: the platform's pools must not opt in, or a second `runsc` would sit unused on every node. A pod-per-sandbox design (a pack's pods, or Agent Sandbox) is what ADR-0023's tool-execution consumer is for.
-- **ADR-0024 (immutable pools).** Fits: workers are a Deployment, and suspended actors resume on any worker in the pool with room, so sessions could survive a rollout that would end a pod-per-sandbox session. Whether draining a node suspends its active actors cleanly (its node agent has drain settings, `--drain-timeout=5m` by default) is to be verified. The platform's own runtime upgrades are its business; snapshots record the runtime they were taken on.
-- **ADR-0025 (this ADR).** The sandbox-pod admission rules reject every worker pod (no runtime class, added capabilities, unconfined profiles, host paths), hence the second profile. NetworkPolicy enforcement, dedicated tainted pools (it already tolerates its own `ate.dev/sandboxClass` taint and supports a separate control-plane pool) and blocked metadata are prerequisites it shares with sandbox pods.
-- **ADR-0026 (VM boundary).** Its microVM class needs `/dev/kvm` but not NIC's Kata install, so ADR-0026 should offer KVM-capable node groups without installing Kata. Hetzner Cloud has no KVM, so only the gVisor class could run there.
-
-### Division of responsibility
-
-| Property | Sandbox-pod profile | Sandbox-platform profile |
-|---|---|---|
-| Runtime boundary around untrusted code | NIC (ADR-0023, ADR-0026), checked by the probe | Platform |
-| Isolation between sandboxes | Pod boundary, NIC | Platform |
-| Network default deny at the pod or pool boundary | NIC | NIC |
-| Egress destinations and credential injection | Pack's proxy, forced by NIC's rules | Platform's gateway, forced by NIC's rules at the pool boundary |
-| Metadata and node-local endpoints | NIC | NIC (pool boundary); platform for actors |
-| Privileges | Root inside the runtime only | Declared envelope, enforced by NIC |
-| Node placement | Dedicated pools, NIC | Dedicated pools, NIC |
-| Snapshots, state store, control plane | n/a | Platform |
-
-### The privilege envelope
-
-An envelope lists the service accounts allowed to use it, capabilities to add, profiles that may be `Unconfined` (seccomp, AppArmor), host paths with their types, extended resources (for example a KVM device), and whether `runAsUser: 0` is allowed. The policy is generated from it as CEL rules; any field not listed is rejected, and `privileged`, `hostNetwork`, `hostPID` and `hostIPC` are never allowed. For Agent Substrate v0.6.0 the worker envelope is the worker row above and the node-agent envelope is the `atelet` row, after its GKE-specific credential-provider paths are made configurable. Envelopes are declared by whoever installs the platform and reported by `nic outputs`; publishing qualified envelopes per platform release is an open question in ADR-0025.
+An earlier draft gave platforms a second profile: dedicated pools, an exact privilege envelope for workers and the node agent, and a boundary level the platform claimed and NIC recorded as unverified. Review dropped it. Actors are not pods with published settings, so NIC cannot check the isolation between them or the runtime the worker starts; the worker and node-agent privileges above (root, `SYS_ADMIN`, unconfined profiles, host paths) put the platform close to host root on its nodes; and a claimed level is a name without a guarantee. Such a platform is separately trusted infrastructure. If one runs on a NIC provider, its integration is its own decision; the useful parts NIC already has are dedicated, tainted pools, enforced NetworkPolicy at the pool boundary and unreachable metadata, and KVM-capable node groups without NIC's Kata install for a microVM class. Agent Sandbox, by contrast, creates ordinary pods and is a consumer of this profile: it should be qualified with an unmodified `SandboxTemplate`, checking its mandatory `activeDeadlineSeconds` against warm pools and controller recreation, and whether its templates create `ipBlock` policies, which the profile rejects.
 
 ### What has to change before Agent Substrate runs on NIC
 
@@ -189,11 +178,24 @@ EKS 1.34 in us-east-1 deployed with NIC from `main`; probe groups `gv` (m6i.larg
 | Namespace totals | `ResourceQuota` (CPU, memory, ephemeral storage, pods, PVCs and requested storage) | NIC, from operator values |
 | Lifetime | Admission requires `activeDeadlineSeconds` no longer than the configured maximum (proposed 24 h) | Packs set it; NIC enforces the maximum |
 
-Ephemeral-storage limits evict a pod that fills its node's disk; PVC-backed workspaces are bounded by their requested size and the quota. Values belong in the stored spec of the sandbox node groups where they are node-level (ADR-0024), so changing the process cap is a rollout. To be verified: that the process cap applies inside gVisor and Kata pods as on runc (gVisor's sandbox and Kata's VM processes are counted in the pod's cgroup on the host, but the limit seen by code inside may differ).
+Ephemeral-storage limits evict a pod that fills its node's disk; PVC-backed workspaces are bounded by their requested size and the quota. Node-level values are part of what the sandbox node groups boot with, so changing the process cap replaces nodes. To be verified: that the process cap applies inside gVisor and Kata pods as on runc (gVisor's sandbox and Kata's VM processes are counted in the pod's cgroup on the host, but the limit seen by code inside may differ).
 
-**Workspace rule.** In the tool-execution pattern the sandbox writes the shared workspace and the trusted agent pod reads it. Content written by untrusted code can attack the trusted side without any escape: Git hooks and configuration (`core.fsmonitor`, `core.hooksPath`), `.envrc`, shell start-up files, editor and language-server configuration, build files a trusted tool might run, and files the agent parses into prompts. Packs run Git with hooks disabled and safe configuration on the trusted side, never source or execute workspace files there, and treat parsed content as untrusted input. NIC cannot see this boundary, so it is a pack obligation, stated in ADR-0025.
+**Workspace rule.** In the tool-execution pattern the sandbox writes the shared workspace and the agent's pod reads it, so content written by untrusted code can attack the agent's side without any escape. NIC cannot see this boundary; it is a pack obligation stated in ADR-0025, and 22.12 gives the cases and acceptance tests for coding agents.
 
-**Tenancy.** Dedicated pools keep sandboxes away from foundational services but not from each other. A runtime escape or a side channel (cache timing, shared CPU resources) between sandboxes on one node is not addressed by the profile; the operator's answer is a `hardware-virtualised` floor (ADR-0021, ADR-0026) and, where needed, separate pools per group of users. Confidential computing (protecting the guest from the operator, for example Confidential Containers on SEV-SNP or TDX) and in-process tool sandboxes (WebAssembly, V8 isolates) are outside the profile.
+**Tenancy.** Dedicated pools keep sandboxes away from foundational services but not from each other. A runtime escape or a side channel (cache timing, shared CPU resources) between sandboxes on one node is not addressed by the profile, and no boundary level addresses side channels: they need separate nodes, so the operator's answer is separate pools per group of users. A VM floor does not change this: on nested virtualisation the VMM and its file-sharing daemon run on the node, so a VM escape lands where a gVisor escape would. Confidential computing (protecting the guest from the operator, for example Confidential Containers on SEV-SNP or TDX) and in-process tool sandboxes (WebAssembly, V8 isolates) are outside the profile.
 
-**Observability (deferred).** The first delivery records no audit trail beyond the pack's proxy. Where it plugs in later: denied-traffic logging from the network policy agent (the VPC CNI's policy-event logs on AWS, kube-router's on k3s), set alongside strict-mode enforcement; gVisor's runtime monitoring, which streams process and system-call events, and Kata's runtime events, set in the runtime configuration that ADR-0024 pins per generation; and sandbox pod lifecycle events. Denial logging is a "should" for the first delivery, because without it operators debug default-deny blind.
+**Observability (deferred).** The first delivery records no audit trail beyond the pack's proxy. Where it plugs in later: denied-traffic logging from the network policy agent (the VPC CNI's policy-event logs on AWS, kube-router's on k3s), set alongside strict-mode enforcement; gVisor's runtime monitoring, which streams process and system-call events, and Kata's runtime events, set in the runtime configuration the sandbox node groups boot with; and sandbox pod lifecycle events. Denial logging is a "should" for the first delivery, because without it operators debug default-deny blind.
+
+## 22.12 Consumer guide: coding agents
+
+ADR-0025's profile is generic; this guide covers what a coding agent's pack must do on its own side, with the acceptance test for each item. The agent's pod is the component exposed to prompt injection and holds the credentials, so these are the routes by which a sandbox can act through it.
+
+| Risk | What the pack does | Acceptance test |
+|---|---|---|
+| Git hooks and configuration written by the sandbox (`.git/hooks`, `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, filters, `include` directives) | Runs Git on the agent's side with hooks disabled (`core.hooksPath=/dev/null`), `safe.directory` scoped, and repository configuration ignored or allowlisted, or runs Git only inside the sandbox | A hook and an `fsmonitor` command planted by the sandbox do not run when the agent commits or checks status |
+| `.envrc`, shell start-up files, editor and language-server configuration, build files (`Makefile`, `package.json` scripts, `pyproject.toml` build backends) | Never sources, executes or loads them on the agent's side; tools that would run them run in the sandbox | A planted `.envrc`, `.bashrc` and language-server configuration produce no execution on the agent's side |
+| Files the agent parses into prompts | Treats them as untrusted input: size limits, no automatic following of links or includes, provenance marked in the prompt | An oversized file and a file with instructions addressed to the agent are handled without acting on them |
+| The SSH session to the sandbox | Pins the sandbox's host key per session; disables agent forwarding, X11 and port forwarding; uses an explicit client configuration (`ssh -F <pack config>`) so nothing in the workspace or `~/.ssh` changes it; `ProxyCommand` and `LocalCommand` unset; no SFTP paths outside the workspace | A changed host key aborts the session; forwarding requests from the sandbox side are refused |
+| The credential-injecting proxy | Allows only the destinations and methods the session needs, scopes injected credentials to them, logs every request, and never returns credentials in responses | A request to an unlisted host and one that tries to read the injected header back both fail |
+| Shared storage with root in the sandbox | Mounts the workspace in the agent's pod with `nosuid` semantics (the peer namespace's `restricted` profile gives `allowPrivilegeEscalation: false`) and never executes files from it | A setuid binary planted by root in the sandbox gains no privilege when run on the agent's side |
 

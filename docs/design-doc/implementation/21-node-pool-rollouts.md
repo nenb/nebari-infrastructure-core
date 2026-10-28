@@ -1,6 +1,6 @@
 # 21. Immutable Node-Pool Rollouts
 
-Mechanisms for [ADR-0024](../../adr/0024-immutable-node-pool-rollouts.md). Each is a design target, not yet implemented or tested as NIC code. The first consumer is ADR-0023 ([§20](20-workload-sandboxing.md#adr-0023-mechanisms-in-full)), which supplies the generation inputs, the verification hook and the pods that end rather than move.
+Mechanisms for [ADR-0024](../../adr/0024-immutable-node-pool-rollouts.md). Each is a design target, not yet implemented or tested as NIC code. Its candidate first consumer is ADR-0023 ([§20](20-workload-sandboxing.md#adr-0023-mechanisms-in-full)), which would supply the generation inputs, the verification hook and the pods that end rather than move; ADR-0023 does not depend on it.
 
 ## 21.1 The rollout record
 
@@ -15,7 +15,7 @@ One record per immutable pool, in a ConfigMap NIC owns (the location is an open 
 | `nicVersion` | The NIC version that started the rollout |
 | `holder` | The lock holder that last wrote the record; every write is a compare-and-swap on the object's `resourceVersion` |
 
-A stored spec holds everything NIC renders a group from: instance type, node image release, availability zones, sizes, labels, taints, every boot input (the trust bundle and the consumer's inputs, including the boundary implementation resolved under ADR-0021, so a change of implementation is a new generation) and the NIC and module versions. Renderers for immutable groups take a stored spec, not the config. On AWS, the tfvars for an immutable pool are built from `current` (and `next` during a rollout); a config change that alters the rendered spec becomes a new `next`. Steady state uses the same path, so a shared-input change never rewrites a serving group.
+A stored spec holds everything NIC renders a group from: instance type, node image release, availability zones, sizes, labels, taints, every boot input (the trust bundle and the consumer's inputs, including the sandbox runtime the group names and its release, so a change of either is a new generation) and the NIC and module versions. Renderers for immutable groups take a stored spec, not the config. On AWS, the tfvars for an immutable pool are built from `current` (and `next` during a rollout); a config change that alters the rendered spec becomes a new `next`. Steady state uses the same path, so a shared-input change never rewrites a serving group.
 
 ## 21.2 Phases
 
