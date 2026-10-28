@@ -547,6 +547,7 @@ A pack runs it with, for example, `Policy{WorkDir: work, ReadOnly: []string{"/us
 | The same VM, container as above | 6.8.0-134-generic, 4 | 47 pass, 8 limit, 3 skip, 0 fail | Pass | All pass |
 | Lima VM, Ubuntu 22.04, aarch64, UID 501 | 5.15.0-185-generic, 1 | Every policy refused before executing (6 of 6 refusal rows); confinement unsupported, reported as such | Pass (positive control skipped) | `landlock_fs` fails, exit 1 |
 | The CI job's steps (Go 1.26.9) in the x86_64 VM above | 6.8.0-134-generic, 4 | `NIC_RECIPE_E2E=1 go test ./recipe/` passed (49 pass, 8 limit) | `go vet`, `go build`, `go test` pass | Not run |
+| CI job "Sandbox probe", GitHub-hosted `ubuntu-24.04` runner, x86_64, UID 1001 | 7.0.0-1017-azure, 8 | 53 pass, 4 limit, 0 fail | Pass | Not run |
 
 | Case | ABI 4 | ABI 6 |
 |---|---|---|
@@ -570,7 +571,7 @@ A pack runs it with, for example, `Policy{WorkDir: work, ReadOnly: []string{"/us
 | Non-Unix socket restriction: `AF_UNIX` reaches the kernel; TCP to the proxy port, UDP, IPv6 and netlink sockets in real use | Reaches it; denied | Reaches it; denied |
 | Non-Unix socket restriction: Unix socket to a proxy in the work directory; ordinary commands | Allowed | Allowed |
 
-The CI job "Sandbox probe" runs the same steps on an `ubuntu-24.04` runner (x86_64); below ABI 3 its end-to-end step is skipped with a warning, never reported as passed. Not tested: kernels at ABI 3, 5 or 7 and above (ABI 3 refusal is covered by the capped-ABI unit test), and a Kubernetes pod or a provider node; the probe covers the Kubernetes pod settings, and the launcher awaits provider qualification.
+The CI job runs on every pull request to `main`; on a runner below ABI 3 its end-to-end step would be skipped with a warning, never reported as passed. At ABI 8 the ABI 6 column applies. Not tested: kernels at ABI 3, 5, 7 or 9 and above (ABI 3 refusal is covered by the capped-ABI unit test), and a Kubernetes pod or a provider node; the probe covers the Kubernetes pod settings, and the launcher awaits provider qualification.
 
 **Limits.** Landlock does not cover metadata changes (`chmod`, `chown`, timestamps), descriptors already open when the restriction is applied (hence `close_range`), or anything the agent passes in on purpose: sandboxing a whole agent protects its surroundings from the agent, not credentials deliberately given to the agent from prompt-injected decisions. Port rules check the port, not the address, so a `proxy-port` command may reach any host on the proxy port; below ABI 10 they do not cover UDP. Below ABI 9 the command can connect to pathname Unix sockets outside the work directory that it can name, and below ABI 6 to abstract sockets and signal processes outside the sandbox. Non-Unix socket restriction does not change that, so a Unix-socket proxy is the only network route only where no other Unix service is reachable from the command: a deployment precondition the pack must ensure (for example, the agent's own sockets and process run as a separate user or outside the pod), or else a separate execution environment. Landlock does not stop kernel exploits (§20.11).
 
