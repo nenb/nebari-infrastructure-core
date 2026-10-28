@@ -24,6 +24,8 @@ The contract describes a cluster's sandboxing support in three independent parts
 | **In-pod capability** a workload uses inside its pod | `process-self-restriction`, `seccomp-user-notification`, `in-pod-namespaces` | `process-self-restriction` described; the other two reserved |
 | **Profile** of guarantees enforced around the pod | Compositions of atomic guarantees | Reserved; none defined |
 
+**Qualified** means a NIC maintainer has tested a configuration (provider, node image, architecture, kernel line and container runtime version) with a working consumer, such as the sandbox probe, and recorded the result in the qualification record. It is a tested claim about that one configuration, not an ongoing promise of support.
+
 **Boundary levels.** At `shared-kernel`, code calls the host kernel directly; at `mediated-kernel`, it never makes system calls directly to the host kernel (for example gVisor); at `hardware-virtualised`, a hardware virtualisation boundary and a guest kernel separate it from the host (for example Kata).
 
 Levels are an acceptance policy: an operator who accepts "at least `mediated-kernel`" accepts any qualified implementation at that level or above. This is a NIC policy convention, not an ecosystem standard or a security ranking: GKE, AKS and `RuntimeClass` expose concrete runtimes, and a user-space kernel and a VM protect in different ways. A higher level never promises that a pack runs unchanged (gVisor has no Landlock), so capabilities are never implied by a level, and NIC never substitutes one implementation for another on its own.
@@ -34,7 +36,7 @@ Levels are an acceptance policy: an operator who accepts "at least `mediated-ker
 
 **The published mapping.** To be sandboxed, a pod needs specific settings: today its security context, and later things like which container runtime to use. The right values depend on the cluster, and a pack can't look them up. Under ArgoCD, Helm can't read the cluster, and the runtime has to be named literally. So NIC publishes the values, and the operator passes them to the pack as ordinary Helm values. Once pack codegen exists ([ADR-0003](0003-software-pack-codegen.md)), it can do this step instead of the operator.
 
-`nic outputs` shows the mapping. It lists named requirements, each with the concrete values a pack copies into its pod spec. A pack that creates sandbox pods through [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) (a Kubernetes SIG project for creating sandbox pods on demand) copies the same values into its `SandboxTemplate`. Today there is one entry, `default`, the cluster's normal runtime:
+`nic outputs` shows the mapping. The operator reads it, not the pack: they check `state` and `capabilities` to decide whether to turn on a pack's sandboxed features on this cluster, then copy the values into that pack's Helm values when installing it, and recheck after node images or Kubernetes versions change. The pack only ever sees the values it is given. It lists named requirements, each with the concrete values a pack copies into its pod spec. A pack that creates sandbox pods through [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) (a Kubernetes SIG project for creating sandbox pods on demand) copies the same values into its `SandboxTemplate`. Today there is one entry, `default`, the cluster's normal runtime:
 
 ```yaml
 version: 1
