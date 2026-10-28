@@ -74,6 +74,18 @@ Detailed implementation specifications and technical designs.
 23. **[VM Boundary](implementation/23-vm-boundary.md)**
     Kata Containers on AWS nested-virtualisation or bare-metal node groups and AKS Pod Sandboxing (design behind the exploratory ADR-0026)
 
+    Expected order of the sandboxing work (numbers are unchanged; ADR-0021 is the only one proposed for acceptance):
+
+    | Order | Work | When |
+    |---|---|---|
+    | 1 | [ADR-0021](../adr/0021-gradual-workload-sandboxing-for-software-packs.md): the contract and Landlock on the default runtime | Now |
+    | 2 | NetworkPolicy enforcement ([#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691)), an issue rather than an ADR | Before any profile |
+    | 3 | [ADR-0025](../adr/0025-untrusted-execution-pods.md): the untrusted-execution profile | Can ship on the default runtime with non-root pods |
+    | 4 | [ADR-0023](../adr/0023-user-space-kernel-capability.md): gVisor | When packs need root or a mediated kernel |
+    | 5 | [ADR-0022](../adr/0022-in-pod-namespaces-capability.md): bubblewrap inside pods | After gVisor, its intended first route |
+    | 6 | [ADR-0026](../adr/0026-vm-boundary-capability.md): Kata | When a consumer needs a VM and AKS has been probed |
+    | 7 | [ADR-0024](../adr/0024-immutable-node-pool-rollouts.md): node-pool rollouts | Only if sessions must survive node upgrades |
+
 ### Operations
 
 Testing, deployment, and operational procedures.

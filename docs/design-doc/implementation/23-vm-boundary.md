@@ -8,7 +8,7 @@ Mechanisms for [ADR-0026](../../adr/0026-vm-boundary-capability.md). Each is a d
 |---|---|---|
 | AWS, nested virtualisation | Managed node group with a custom launch template setting `CpuOptions.NestedVirtualization=enabled` on a supported family; Kata installed at boot | Observed (23.7): 7th- and 8th-generation Intel families from `.large` (166 types in us-east-1, listed by `describe-instance-types` filtered on `processor-info.supported-features=nested-virtualization`); `/dev/kvm` on the AL2023 EKS node; Kata 4.2.0 runs. Other regions and performance against bare metal to be verified |
 | AWS, bare metal | A `.metal` family; Kata installed at boot | Fallback; no launch-template CPU option needed |
-| AKS | Pod Sandboxing on an Azure Linux node pool; Azure's runtime class | A separate implementation (its own VMM and guest, managed by Azure); nothing qualified on AWS carries over. Not yet probed, including against NIC's AKS module |
+| AKS | Pod Sandboxing on an Azure Linux node pool; Azure's runtime class | A separate implementation (its own VMM and guest, managed and upgraded by Azure, trusted as the provider's); nothing qualified on AWS carries over, and its Azure Linux host and Kata guest are qualified independently of the Ubuntu Landlock expectations in §20.8. Not yet probed, including against NIC's AKS module |
 | Hetzner Cloud | None (no nested virtualisation) | Unsupported; a cloud VM per sandbox outside Kubernetes is the alternative |
 | `existing`, kind | Operator's runtime | Verification only, as in ADR-0023 |
 
@@ -20,13 +20,13 @@ Mirrors the boot sequence sketched for ADR-0023 (§20, "Boot-step dependency ord
 2. NIC's artifact contains the Kata runtime and shim (`containerd-shim-kata-v2`), the guest kernel and guest image, and the VMM, with a per-file list, verified as ADR-0023's is.
 3. The containerd handler `kata` uses `runtime_type = "io.containerd.kata.v2"`, with the Kata configuration in the release directory.
 4. The node check runs a test pod sandbox through the CRI with handler `kata` and checks Kata-specific evidence: `uname -r` inside equals the pinned Kata guest kernel's release, and `/sys/class/dmi/id` identifies NIC's VMM (QEMU) rather than the EC2 instance type. The hypervisor CPU flag is not evidence: EC2 nodes show it, so a gVisor pod on EC2 sees it too. It also checks that the pod runs as root inside and can write to an `emptyDir`.
-5. NIC creates `RuntimeClass` `nebari-kata` itself, labelled `sandbox.nebari.dev/level: hardware-virtualised`, selecting `node-restriction.kubernetes.io/nebari-sandbox-kata` (set by the cluster-side labeller after verification, never by the node) and tolerating the dedicated taint; the class kata-deploy creates (`kata-qemu-runtime-rs`, overhead 320Mi/250m) has a node selector but no toleration for a custom taint.
+5. NIC creates `RuntimeClass` `nebari-kata` itself, labelled `sandbox.nebari.dev/level: hardware-virtualised`, selecting `nebari.dev.node-restriction.kubernetes.io/sandbox-kata` (set by the cluster-side labeller after verification, through a trustworthy node-to-instance binding rather than the node's own `spec.providerID` alone, never by the node) and tolerating the dedicated taint; the class kata-deploy creates (`kata-qemu-runtime-rs`, overhead 320Mi/250m) has a node selector but no toleration for a custom taint.
 
 The launch template's CPU option, the instance family and the Kata, VMM and guest-kernel versions are part of what the group boots with, so changing any of them replaces nodes, under the lifecycle invariants stated in ADR-0023.
 
 ## 23.3 AKS
 
-NIC's AKS module creates a node pool with Pod Sandboxing enabled (the node pool's workload runtime, on Azure Linux; field names to be verified) and NIC publishes Azure's runtime class name in the requirement mapping the sketches propose (§20.6). Azure owns the runtime's installation and version: NIC declares it as a separate implementation, with its own properties established by a probe on AKS, and observes it with the deploy check, without implying control. ADR-0025's profile on AKS requires the Cilium dataplane (#691).
+NIC's AKS module creates a node pool with Pod Sandboxing enabled (the node pool's workload runtime, on Azure Linux; field names to be verified) and NIC publishes Azure's runtime class name as the `runtimeClassName` of an entry in ADR-0021's published mapping (§20.6); provider-managed and externally owned class names are allowed there. Azure owns the runtime's installation and version: NIC declares it as a separate implementation, with its own properties established by a probe on AKS, and observes it with the deploy check, without implying control. ADR-0025's profile on AKS requires the Cilium dataplane (#691).
 
 ## 23.4 Memory, start time and storage
 
@@ -59,7 +59,7 @@ Per instance family, node image and Kata release:
 
 ### EKS, 2026-10-27
 
-us-east-1, EKS 1.34 deployed with NIC from `main`. Raw output in `tests/sandbox-probe/session5-results/aws/` (`t1-*`, `nested-virt-*`). Kata was installed with the kata-deploy chart for the probe only; 23.6 rejects it for NIC.
+us-east-1, EKS 1.34 deployed with NIC from `main`. Raw output is not committed; this summary is the record. Kata was installed with the kata-deploy chart for the probe only; 23.6 rejects it for NIC.
 
 - **Nested virtualisation:** the EC2 API exposes `CpuOptions.NestedVirtualization` on `run-instances` and launch templates. A c8i-flex.large with it enabled (AL2023, kernel 6.18) had the `vmx` flag, `kvm_intel` and `/dev/kvm`; `KVM_GET_API_VERSION` returned 12 and `KVM_CREATE_VM` and `KVM_CREATE_VCPU` succeeded. The same type without it had neither. The CLI help names only 8th-generation types, but `describe-instance-types` lists 166 types across c7i, c7i-flex, m7i, m7i-flex, r7i, r7iz, c8i, c8i-flex, c8id, m8i, m8i-flex, m8id, r8i, r8i-flex, r8id, i7i, i7ie and x8i.
 - **EKS node group:** an m8i-flex.large managed node group with a custom launch template (the CPU option plus NIC's security groups) joined normally; the AL2023 EKS node (kernel 6.12) had `kvm_intel` and `/dev/kvm`.

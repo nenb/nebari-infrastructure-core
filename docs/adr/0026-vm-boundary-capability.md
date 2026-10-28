@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet, and paused until a consumer needs it and AKS has been probed. Depends only on ADR-0021, whose `hardware-virtualised` boundary level it implements with Kata (which this sketch calls the `vm-boundary` family). Where it mentions the requirement mapping, it relies on the requirement sets and mapping the sketches propose adding to ADR-0021's contract ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#proposed-additions-requirement-sets-and-a-requirement-mapping)). It mirrors mechanisms sketched in [ADR-0023](0023-user-space-kernel-capability.md) and can be required by [ADR-0025](0025-untrusted-execution-pods.md)'s profile, but depends on neither; [ADR-0024](0024-immutable-node-pool-rollouts.md) is not assumed to apply unchanged. Mechanisms and the verification checklist are in the [design doc](../design-doc/implementation/23-vm-boundary.md).
+Proposed (DRAFT, exploratory; expected sixth in order, when a consumer needs a VM and AKS has been probed): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet, and paused until a consumer needs it and AKS has been probed. Depends only on ADR-0021, whose `hardware-virtualised` boundary level it implements with Kata (which this sketch calls the `vm-boundary` family). It adds entries to ADR-0021's published mapping ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#proposed-additions-more-mapping-entries-sketches)) and follows ADR-0021's guidance on placement labels and lifecycle; AKS Pod Sandboxing is provider-managed and trusted as the provider's. It mirrors mechanisms sketched in [ADR-0023](0023-user-space-kernel-capability.md) and can be required by [ADR-0025](0025-untrusted-execution-pods.md)'s profile, but depends on neither; [ADR-0024](0024-immutable-node-pool-rollouts.md) is not assumed to apply unchanged. Mechanisms and the verification checklist are in the [design doc](../design-doc/implementation/23-vm-boundary.md).
 
 ## Date
 
@@ -23,7 +23,7 @@ Because a VM pod is still a pod, it fits ADR-0021's interface and can reuse the 
 ## Decision Drivers
 
 - **A boundary with its own kernel** for workloads whose threat model needs one.
-- **Same interface as gVisor.** Packs read their settings from the proposed requirement mapping, so a set that resolves to Kata needs no pack change.
+- **Same interface as gVisor.** Packs receive the values of a mapping entry, so an entry that resolves to Kata needs no pack change.
 - **Use the provider's own mechanism where one exists** (AKS), and install at boot elsewhere (ADR-0023's driver).
 - **Elastic, not bare metal, where possible.**
 - **Promise only what is verified**, per instance family and node image.
@@ -42,7 +42,7 @@ Chosen option: "Option 2", because it delivers a guest-kernel boundary through t
 
 ### The implementation
 
-**`vm-boundary`** is this sketch's name for implementations of ADR-0021's **`hardware-virtualised`** level: a pod that uses its `RuntimeClass` (`nebari-kata`, or Azure's class on AKS) runs inside its own virtual machine with its own guest kernel, isolated from the host by hardware virtualisation. Kata Containers is its first implementation. Under ADR-0021's ordering rule, a stronger level satisfies an operator's `mediated-kernel` policy, but satisfies a requirement set only where Kata has every property the set needs. ADR-0021 builds no choice between two qualifying implementations, so offering gVisor and Kata for the same set on one provider needs that choice decided first.
+**`vm-boundary`** is this sketch's name for implementations of ADR-0021's **`hardware-virtualised`** level: a pod that uses its `RuntimeClass` (`nebari-kata`, or Azure's class on AKS) runs inside its own virtual machine with its own guest kernel, isolated from the host by hardware virtualisation. Kata Containers is its first implementation. Under ADR-0021's acceptance policy, an operator who accepts `mediated-kernel` or above may accept Kata, but Kata is offered for a mapping entry only where it has every property the entry needs. NIC never substitutes one implementation for another, so an entry that gVisor and Kata could both satisfy on one provider needs the operator's acceptance list (future work in ADR-0021).
 
 **Two implementations, qualified separately.** Kata installed by NIC on AWS (QEMU) and AKS Pod Sandboxing (a different VMM and guest, managed by Azure) are separate implementations of the level. Properties established for one are not carried over to the other; the table below is for AWS only, and AKS has none until it is probed.
 
@@ -80,8 +80,8 @@ cluster:
 
 1. **`nic validate`** checks the provider, instance family (nested virtualisation or bare metal), node image, architecture and the pinned Kata release against the support matrix. Hetzner is rejected with a message naming the alternative; AKS requires a node pool with Pod Sandboxing.
 2. **AWS: installation at boot on opted-in groups.** The node group's launch template enables nested virtualisation on a supported family (not needed on bare metal) and keeps NIC's node and VPC-endpoint security groups; a boot step installs NIC's published Kata artifact (runtime, shim, guest kernel and image, and the VMM), verified like ADR-0023's, and registers a containerd handler `kata`. The node checks that `/dev/kvm` exists before installing.
-3. **AKS: the built-in runtime.** NIC opts the node pool into Pod Sandboxing through its AKS module and publishes Azure's runtime class in the requirement mapping rather than installing anything. Azure owns that runtime's installation and version; NIC declares and observes it (ADR-0021's declaration and observation layers) without implying it controls either.
-4. **Node check and placement**, mirroring ADR-0023's sketch: a test pod sandbox through the CRI with the `kata` handler must show **Kata-specific evidence**: the kernel release inside matches the pinned Kata guest kernel, and the VM's firmware (DMI) identifies NIC's VMM rather than the EC2 instance. A different kernel plus the CPU's hypervisor flag is not enough, since EC2 nodes already show the flag and a gVisor pod there would pass. The node only reports failure itself (`sandbox.nebari.dev/kata: failed`); a cluster-side component sets the placement label `node-restriction.kubernetes.io/nebari-sandbox-kata` after verifying the node. NIC creates `RuntimeClass` `nebari-kata`, labelled `sandbox.nebari.dev/level: hardware-virtualised`, with a memory `overhead` set from measurement, selecting that label and tolerating the dedicated taint (the class kata-deploy creates has no toleration for a custom taint).
+3. **AKS: the built-in runtime.** NIC opts the node pool into Pod Sandboxing through its AKS module and publishes Azure's class name (`kata-vm-isolation`) as the mapping entry's `runtimeClassName` rather than installing anything. The runtime is provider-managed: Azure owns its installation and version and upgrades it on its own schedule, NIC trusts it as the provider's and only observes it, and its qualification record names the AKS versions it covers. AKS's Azure Linux host and its Kata guest are qualified independently of the Ubuntu Landlock expectations ADR-0021 records.
+4. **Node check and placement**, mirroring ADR-0023's sketch: a test pod sandbox through the CRI with the `kata` handler must show **Kata-specific evidence**: the kernel release inside matches the pinned Kata guest kernel, and the VM's firmware (DMI) identifies NIC's VMM rather than the EC2 instance. A different kernel plus the CPU's hypervisor flag is not enough, since EC2 nodes already show the flag and a gVisor pod there would pass. The node only reports failure itself (`sandbox.nebari.dev/kata: failed`); a cluster-side component sets the placement label `nebari.dev.node-restriction.kubernetes.io/sandbox-kata` after verifying the node, with a trustworthy node-to-instance binding (never an attacker-supplied `spec.providerID` alone). As ADR-0021's guidance says, this stops only self-asserted eligibility through kubelet credentials; a compromised node that already carries the label is outside it. NIC creates `RuntimeClass` `nebari-kata`, labelled `sandbox.nebari.dev/level: hardware-virtualised`, with a memory `overhead` set from measurement, selecting that label and tolerating the dedicated taint (the class kata-deploy creates has no toleration for a custom taint).
 5. **`nic deploy` smoke pods** on every labelled node of every opted-in group, with the same Kata-specific evidence, plus ADR-0025's probe under the VM runtime when that profile admits it. They are diagnostics, not attestation.
 6. **Upgrades** meet the lifecycle invariants stated in ADR-0023 (unverified nodes get no pods, no unsandboxed fallback, explicit semantics changes, a path for security updates, documented recovery): a change to the Kata release, VMM, guest kernel or CPU options replaces nodes. On AKS the provider owns the runtime's lifecycle.
 
@@ -93,7 +93,7 @@ cluster:
 
 ### Combining with in-pod capabilities
 
-Validation uses the properties above: Kata on AWS has `process-self-restriction` (Landlock ABI 7 in the guest), so it can satisfy a set that needs Landlock at `mediated-kernel` or above where gVisor cannot; `in-pod-namespaces` is not yet probed and is not offered until it is. Nothing is inferred for AKS. One runtime applies per pod, so gVisor and a VM never combine.
+Validation uses the properties above: Kata on AWS has `process-self-restriction` (Landlock ABI 7 in the guest), so it can satisfy an entry that needs Landlock at `mediated-kernel` or above where gVisor cannot; `in-pod-namespaces` is not yet probed and is not offered until it is. Nothing is inferred for AKS. One runtime applies per pod, so gVisor and a VM never combine.
 
 ### Security
 
@@ -105,7 +105,7 @@ Validation uses the properties above: Kata on AWS has `process-self-restriction`
 
 ### Trust model
 
-- **Trusted:** the operator, NIC, the pinned Kata release, VMM and guest kernel (on AKS, Azure's runtime), the labeller, and the provider's node image.
+- **Trusted:** the operator, NIC, the pinned Kata release, VMM and guest kernel (on AKS, Azure's runtime, trusted as the provider's: NIC neither installs nor patches it), the labeller, and the provider's node image.
 - **A hostile workload** may run as root in the guest and use the VMM's virtual devices.
 - **NIC enforces** placement only on verified nodes and that pods naming the class never run on another runtime; network rules come from ADR-0025's profile where used.
 - **The pack enforces** keeping trusted containers out of the VM pod and credentials out of the sandbox.
