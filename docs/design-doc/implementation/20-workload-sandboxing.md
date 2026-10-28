@@ -14,7 +14,7 @@ This document holds the implementation design behind [ADR-0021: Workload Sandbox
 | 3 | Namespace sandbox in the pod | bubblewrap, nsjail, minijail, rootless podman/buildah | Linux namespaces inside the pod, on the shared host kernel | Yes: node prep and security profiles (the four layers below) | Shares the host kernel; extra kernel attack surface from user namespaces | `in-pod-namespaces`, reserved for a later ADR |
 | 3b | Headless browser in the pod | Chromium/Playwright running untrusted pages or scripts | Chromium's own sandbox, which also uses user namespaces | Same as row 3, otherwise it runs with `--no-sandbox` | As row 3 | Potential consumer of `in-pod-namespaces`; not qualified (Chromium's sandbox may need more than the guarantee, such as its own pid namespace) |
 | 3c | System-container runtime | Sysbox, used to run `dockerd` or `systemd` inside a workspace | User namespaces plus virtualised `/proc` and `/sys`, on the shared host kernel | Yes: either a `RuntimeClass` installed on the nodes, or a privileged outer container that hosts an unprivileged inner one | Shares the host kernel; the privileged-outer-container variant is root on the node | Not delivered here. As a `RuntimeClass`, a possible later implementation; the privileged-outer-container variant is root on the node and would need its own trust model |
-| 4 | Separate locked-down pod per task | A Job or Agent Sandbox `Sandbox` with the default runtime: no service-account token, NetworkPolicy, read-only root, optionally `hostUsers: false` | Standard container isolation, on the shared host kernel | Pod security settings: none. NetworkPolicy: only takes effect where the network plugin enforces it, which is not the case on AWS or Azure as NIC deploys them today (tracked in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) and [#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675)). `hostUsers: false` needs recent Kubernetes, containerd and kernel | Start-up latency; the pack needs RBAC to create pods; still a shared kernel | Basic form: packs can do this today. collab-hub-pack already runs workers as separate pods with no ServiceAccount token (egress restriction still in progress); Nebi has proposed the same for its builds (see Related work). Its network controls depend on #691/#675. With `hostUsers: false`: a possible later capability |
+| 4 | Separate locked-down pod per task | A Job or Agent Sandbox `Sandbox` with the default runtime: no service-account token, NetworkPolicy, read-only root, optionally `hostUsers: false` | Standard container isolation, on the shared host kernel | Pod security settings: none. NetworkPolicy: only takes effect where the network plugin enforces it, which is not the case on AWS or Azure as NIC deploys them today (tracked in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691) and [#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675)). `hostUsers: false` needs recent Kubernetes, containerd and kernel | Start-up latency; the pack needs RBAC to create pods; still a shared kernel | Basic form: packs can do this today. At least one Nebari pack already runs workers as separate pods with no ServiceAccount token (egress restriction still in progress); Nebi has proposed the same for its builds (see Related work). Its network controls depend on #691/#675. With `hostUsers: false`: a possible later capability |
 | 5 | User-space kernel | gVisor (`runsc`) | gVisor implements the Linux syscall interface itself; the workload never calls the host kernel directly | Yes: install the runtime and a `RuntimeClass` (built into some managed offerings, otherwise installed per provider) | I/O and syscall overhead; some applications are incompatible | An implementation of the reserved `mediated-kernel` level; later ADR |
 | 6 | MicroVM per pod | Kata Containers, Firecracker, Cloud Hypervisor | Hardware virtualisation with a separate guest kernel | Yes: runtime install, and nodes that expose `/dev/kvm` (bare metal, or instance types with nested virtualisation) | More memory per pod, slower start; usually a dedicated KVM-capable node group | An implementation of the reserved `hardware-virtualised` level; later ADR |
 | 7 | Dedicated node or cluster | Per-tenant node pools, a separate cluster, confidential VMs | A separate machine | Yes: provisioning | Cost | Out of scope |
@@ -229,7 +229,78 @@ Today, conditional software ([ADR-0006](../../adr/0006-conditional-foundational-
 3. **`nic validate`.** If the operator sets `sandbox.minLandlockABI`, NIC compares it with the floor of every node group, offline, since the capability has no placement and pods may land on any group. A known floor below the requirement is an error naming the group; an unknown floor is reported and left to `nic deploy`. Without the setting nothing is reported. No labels are set, so NIC's Hetzner provider needs no node-pool label support for this capability.
 4. **`nic deploy` kernel check.** Once nodes are up, NIC reads each node's `node.status.nodeInfo.kernelVersion` and converts it to the Landlock ABI that kernel version introduced upstream (5.13 ABI 1, 5.19 ABI 2, 6.2 ABI 3, 6.7 ABI 4, 6.10 ABI 5, 6.12 ABI 6). A node below `minLandlockABI` fails the deploy; a node below ABI 3 when nothing is required is a warning. Results per node group and node, with the time of the check, are shown by `nic outputs`, which already reads the live cluster. It installs nothing and adds no CLI command. It is a diagnostic inference, not enforcement or attestation: a kernel version does not show Landlock enabled at boot or account for distribution backports, and nodes added after the deploy (autoscaling, replacement) are not checked, which is why consumers check the guarantee themselves. For `existing` clusters and kind (whose kernel is the host's) NIC does not choose the node image, so the floor is unknown and this check is the only judgement: it still fails a deploy whose requirement the nodes' kernels cannot meet.
 5. **Probe: maintainers' release testing; automating it is an open question in ADR-0021.** The probe is the evidence behind each provider's floor. A maintainer runs it on a fresh node of each supported image family before NIC promises the floor there, and again when a provider changes kernel line for a supported Kubernetes version; it is not run on users' clusters. A non-root pod with every capability dropped and the default seccomp profile applies a Landlock ruleset and confirms a denied write fails, reports the highest ABI available and, at ABI 4, confirms a disallowed `connect` fails, and installs a nested seccomp user-notification filter whose supervisor injects a descriptor into the child with `SECCOMP_IOCTL_NOTIF_ADDFD` (with `SECCOMP_ADDFD_FLAG_SEND`), and the child then uses that descriptor. Each denial check has a positive control on the same node (the same write or `connect` succeeds without the ruleset), so an unrelated filesystem or network failure cannot pass as successful confinement. The run also records `/sys/kernel/security/lsm`, so a family whose kernel has Landlock compiled in but not enabled at boot is caught. In-cluster scheduled re-verification applies only to capabilities with installed components.
-6. **Documentation.** A pack-developer page (declare the requirement, check the Landlock ABI at startup, refuse sandboxed work rather than fall back) and an operator page (the support policy, qualifying provider and version combinations, and what the `nic validate` and `nic deploy` messages mean).
+6. **Documentation.** A pack-developer page (declare the requirement, check the Landlock ABI at startup, refuse sandboxed work rather than fall back, and the recipe below) and an operator page (the support policy, qualifying provider and version combinations, and what the `nic validate` and `nic deploy` messages mean).
+
+### Recipe: confining a command
+
+This is the qualified consumer of item 5, written for a pack. It is an example, not a library NIC ships: any Landlock library that applies the same ruleset will do. It needs no capability, runs under Pod Security `restricted`, and is shown in Go with `golang.org/x/sys/unix`, as the probe is.
+
+1. **Check at startup.** `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` returns the ABI; `ENOSYS` means Landlock is absent and `EOPNOTSUPP` that it is built in but not enabled at boot. Below ABI 3, or below ABI 4 if the pack relies on port rules, refuse sandboxed work.
+2. **Restrict the process that will run the command, then execute it.** Set `no_new_privs`; create a ruleset that handles `WRITE_FILE`, `MAKE_REG`, `REMOVE_FILE` and `TRUNCATE`, with a `PATH_BENEATH` rule granting them beneath the working directory; at ABI 4, also handle `CONNECT_TCP` and `BIND_TCP`, with a `NET_PORT` rule granting `CONNECT_TCP` on the allowed port only; call `landlock_restrict_self`, then `execve` the command. The restriction is inherited by everything the command starts and cannot be lifted.
+
+```go
+// landlockABI returns the kernel's Landlock ABI, or 0 if Landlock is absent
+// (ENOSYS) or not enabled at boot (EOPNOTSUPP).
+func landlockABI() int {
+	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0,
+		unix.LANDLOCK_CREATE_RULESET_VERSION)
+	if errno != 0 {
+		return 0
+	}
+	return int(abi)
+}
+
+// confineAndExec restricts the calling thread and replaces the process with
+// argv: writes only beneath workDir and, at ABI 4 or newer, TCP connect only
+// to port and no TCP bind. abi must be at least 3.
+func confineAndExec(workDir string, port uint64, abi int, argv []string) error {
+	runtime.LockOSThread() // no_new_privs and Landlock apply to this thread
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return err
+	}
+	fs := uint64(unix.LANDLOCK_ACCESS_FS_WRITE_FILE | unix.LANDLOCK_ACCESS_FS_MAKE_REG |
+		unix.LANDLOCK_ACCESS_FS_REMOVE_FILE | unix.LANDLOCK_ACCESS_FS_TRUNCATE)
+	attr := unix.LandlockRulesetAttr{Access_fs: fs}
+	size := unsafe.Sizeof(attr.Access_fs)
+	if abi >= 4 {
+		attr.Access_net = unix.LANDLOCK_ACCESS_NET_CONNECT_TCP | unix.LANDLOCK_ACCESS_NET_BIND_TCP
+		size = unsafe.Offsetof(attr.Scoped)
+	}
+	ruleset, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET,
+		uintptr(unsafe.Pointer(&attr)), size, 0)
+	if errno != 0 {
+		return errno
+	}
+	dir, err := unix.Open(workDir, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	pathRule := unix.LandlockPathBeneathAttr{Allowed_access: fs, Parent_fd: int32(dir)}
+	if _, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset,
+		unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&pathRule)), 0, 0, 0); errno != 0 {
+		return errno
+	}
+	unix.Close(dir)
+	if abi >= 4 {
+		portRule := struct{ AllowedAccess, Port uint64 }{unix.LANDLOCK_ACCESS_NET_CONNECT_TCP, port}
+		if _, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset,
+			2 /* LANDLOCK_RULE_NET_PORT */, uintptr(unsafe.Pointer(&portRule)), 0, 0, 0); errno != 0 {
+			return errno
+		}
+	}
+	if _, _, errno = unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, ruleset, 0, 0); errno != 0 {
+		return errno
+	}
+	unix.Close(int(ruleset))
+	return unix.Exec(argv[0], argv, os.Environ())
+}
+```
+
+3. **Optionally, mediate system calls.** A pack that hands the command descriptors (for example a connection to a proxy) installs, before `execve`, a second seccomp filter that returns `SECCOMP_RET_USER_NOTIF` for the chosen system calls, created with `SECCOMP_FILTER_FLAG_NEW_LISTENER`, and passes the listener descriptor to a supervisor process over a Unix socket. The supervisor answers each notification with `SECCOMP_IOCTL_NOTIF_ADDFD` and `SECCOMP_ADDFD_FLAG_SEND`. It must not be used as a check-then-continue policy (§20.10).
+
+**What is tested.** On EKS 1.34 AL2023 and Hetzner Ubuntu 24.04 nodes, under `RuntimeDefault`, the probe (item 5) ran the startup check; the filesystem ruleset above, with positive controls, denying a write and a truncation outside the allowed directory; at ABI 4, the port ruleset above, with `connect` to the allowed port succeeding, `connect` to another port and `bind` failing, and UDP unaffected; and step 3 for `openat`, stacked on an allow-all filter. The probe applied the filesystem and port rulesets in separate processes and ran its checks in the restricted process itself. **Not yet tested:** both rulesets in one, and `execve` of a command after restriction (the snippet compiles for Linux but has not been run on a node). The kernel documents that a Landlock domain survives `execve`.
+
+**Limits.** The ruleset confines writes only: reads are unrestricted unless the pack also handles read rights (untested here). Port rules check the port, not the address, and do not cover UDP or sockets inherited already connected (§20.3), so the pack closes descriptors the command should not inherit and gives it no credentials it should not use. Landlock does not stop kernel exploits (§20.10).
 
 ## 20.9 Verification
 
@@ -268,9 +339,7 @@ A later `in-pod-namespaces` capability on the host kernel would add real risk, s
 
 **Packs already building isolation (rows 4 and 2-3 consumers).**
 
-- [collab-hub-pack#167](https://github.com/nebari-dev/collab-hub-pack/issues/167) Plan hosted coding workspaces for Nebari and Collab Hub (planning). The closest match to the coding-agent use case that motivates this ADR.
-- [collab-hub-pack#6](https://github.com/nebari-dev/collab-hub-pack/issues/6) Workers as separate pods with no ServiceAccount token, created only by a least-privilege controller (row 4). A separate-worker implementation exists; its egress and controller work remain unfinished, so it is a precedent rather than a finished reference.
-- [collab-hub-pack#11](https://github.com/nebari-dev/collab-hub-pack/issues/11) Restrict worker egress to hub-mediated paths. Notes that a NetworkPolicy cannot allow a hostname, so model traffic goes through an in-cluster egress gateway; the same constraint applies to Landlock (row 2), which restricts by port, not host.
+- An existing Nebari pack runs workers as separate pods with no ServiceAccount token, created only by a least-privilege controller (row 4). Its egress and controller work remain unfinished, so it is a precedent rather than a finished reference. Its plan to restrict worker egress notes that a NetworkPolicy cannot allow a hostname, so model traffic goes through an in-cluster egress gateway; the same constraint applies to Landlock (row 2), which restricts by port, not host.
 - [nebi#445](https://github.com/nebari-dev/nebi/issues/445) and [nebi#513](https://github.com/nebari-dev/nebi/issues/513) Untrusted environment builds run in a shared worker with database credentials; proposal to run each job in its own pod (row 4). Proposed, not yet implemented.
 - [nebari-operator#197](https://github.com/nebari-dev/nebari-operator/issues/197) A shared NetworkPolicy helper for packs.
 
