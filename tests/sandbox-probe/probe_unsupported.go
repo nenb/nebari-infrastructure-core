@@ -2,12 +2,16 @@
 
 package main
 
-import "runtime"
+import (
+	"fmt"
+	"os"
+	"runtime"
+)
 
-func execute(_ []string) (probeResult, bool) {
-	result := emptyProbeResult()
-	result.Arch = runtime.GOARCH
-	result.Landlock.Status = "unsupported_os"
-	result.Errors = append(result.Errors, "the sandbox probe must run on Linux")
-	return result, true
+func runProbe() probeResult {
+	return unsupportedOSResult(runtime.GOARCH)
+}
+
+func runChild(_ []string) {
+	fmt.Fprintln(os.Stderr, "probe child modes run only on Linux")
 }

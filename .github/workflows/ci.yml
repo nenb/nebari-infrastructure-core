@@ -58,6 +58,45 @@ jobs:
           name: codecov-umbrella
         continue-on-error: true
 
+  # The sandbox probe and reference launcher (ADR-0021) are their own Go
+  # module, so the root jobs above do not build or test them.
+  sandbox-probe:
+    name: Sandbox probe
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tests/sandbox-probe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/sandbox-probe/go.mod
+          cache-dependency-path: tests/sandbox-probe/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Unit tests
+        run: go test -count=1 ./...
+
+      # Runs every launcher case confined and as an unconfined control. On a
+      # runner without Landlock ABI 3 the test is skipped, not passed; the
+      # warning makes that visible in the run summary.
+      - name: Launcher end-to-end test
+        run: |
+          set -o pipefail
+          NIC_RECIPE_E2E=1 go test -v -count=1 -run '^TestEndToEnd$' ./recipe/ | tee "$RUNNER_TEMP/recipe-e2e.log"
+          if grep -q -- '--- SKIP: TestEndToEnd' "$RUNNER_TEMP/recipe-e2e.log"; then
+            echo "::warning title=Launcher end-to-end test skipped::Landlock ABI 3 is not available on this runner, so the launcher's confinement was not exercised"
+          fi
+
   test-journeys-lib:
     name: Journey library tests
     runs-on: ubuntu-latest

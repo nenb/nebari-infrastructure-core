@@ -89,7 +89,7 @@ ADR-0021 states the contract on three independent axes: an ordered **boundary le
 
 | Capability | Guarantee | Qualified consumer | Status |
 |---|---|---|---|
-| `process-self-restriction` | A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict itself and its descendants with Landlock (ABI 3 or newer; the ABI is part of each qualification). | The reference consumer (§20.8): one combined filesystem and TCP ruleset, then `execve` of a command | **Described (ADR-0021)**: qualified per configuration; enforcement is the consumer's |
+| `process-self-restriction` | A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict its own and its descendants' filesystem access with Landlock at ABI 3 or newer, and TCP connect and bind at ABI 4 or newer (the ABI is part of each qualification). | The probe (§20.8): filesystem and TCP rulesets against positive controls in a restricted pod, with a verdict for each. The reference launcher (§20.8) is tested on local VMs, containers and in CI, awaiting provider qualification | **Described (ADR-0021)**: qualified per configuration; enforcement is the consumer's |
 | `seccomp-user-notification` | The same process can install nested seccomp filters with user notification, including `SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SEND`. User notification is a mechanism for emulating syscalls or injecting descriptors, not a policy check: a supervisor that inspects arguments and then lets the call continue can race with changes to that memory, as the Linux manual warns. | The probe's notification path (two stacked filters, listener transfer, descriptor injection) | Reserved. Probed separately because a container runtime or default-profile change can break it independently of the kernel |
 | `in-pod-namespaces` | A non-root process with no added capabilities, applying the published settings, can create a user namespace that maps **only its own UID and GID**, and mount, network, IPC and UTS namespaces inside it. The container's masked `/proc` is retained (bind-mounted, not freshly mounted), so no pid namespace with a fresh procfs is guaranteed. | One pinned bubblewrap version: a capability test and two qualified configurations (§20.9) | Sketched in [ADR-0022](../../adr/0022-in-pod-namespaces-capability.md); no supported route yet |
 
@@ -156,25 +156,25 @@ Everything NIC reports about a capability is in one of three states, kept apart 
 
 ### The published mapping
 
-NIC publishes a mapping from requirement name to concrete values. In ADR-0021 it is computed from config and shown by `nic outputs`; there is no automatic resolution, and `default` is the only entry. The operator copies the values into the pack's Helm values until pack codegen ([ADR-0003](../../adr/0003-software-pack-codegen.md)); packs copy them into pod specs, volume claims and Agent Sandbox `SandboxTemplate`s, which take an exact `runtimeClassName`. Packs never look anything up in the cluster and nothing selects a `RuntimeClass` by label.
+NIC publishes a versioned mapping from requirement name to concrete values. In ADR-0021 it is computed from config and shown by `nic outputs`; there is no automatic resolution, and `default` is the only entry. The operator copies the values into the pack's Helm values until pack codegen ([ADR-0003](../../adr/0003-software-pack-codegen.md)); packs copy them into pod specs and Agent Sandbox `SandboxTemplate`s, which take an exact `runtimeClassName`. Packs never look anything up in the cluster and nothing selects a `RuntimeClass` by label.
 
 ```yaml
 # nic outputs -o yaml (sandbox section; illustrative)
 sandbox:
   observedAt: 2026-10-28T10:00:00Z        # fresh read of the nodes; nothing is stored
-  requirements:
-    default:
-      level: shared-kernel
-      capabilities: [process-self-restriction]
-      runtimeClassName: ""                 # the cluster's normal runtime
-      placement: {}                        # empty: no node group is known not to qualify
-      securityContext:
-        seccompProfile: {type: RuntimeDefault}
-      workspaceStorageClass:
-        name: gp2                          # InfraSettings.StorageClass: the cluster's normal class
-        notes: ""                          # access mode and ownership notes
-      profile: {}                          # reserved
-      implementation: {}                   # release and property-set version; empty for the default runtime
+  mapping:
+    version: 1
+    requirements:
+      default:
+        level: shared-kernel
+        state: unknown                     # the gpu group is unknown (rule below)
+        capabilities: []                   # process-self-restriction only when state is qualified
+        podSecurityContext:
+          runAsNonRoot: true
+          seccompProfile: {type: RuntimeDefault}
+        containerSecurityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
   nodeGroups:
     user:
       expectation: {state: qualified, landlockABI: 6, record: aws-al2023-x86_64-6.12}
@@ -186,7 +186,11 @@ sandbox:
   unassigned: []
 ```
 
-`placement` for `default` is empty when no node group is known not to qualify. Where some are `unsupported`, it is a node selector for the others, using a label NIC itself sets on node groups through provider config; a provider that cannot set node-group labels leaves it empty and `nic outputs` names the groups that do not qualify. `unknown` groups are not excluded, since excluding them would make most clusters unschedulable; the pack's startup check covers them. Storage portability is part of the entry: a later entry names a storage class known to work with its runtime (the tested gVisor configuration could not write to EFS access points as NIC configures them), not a promise that any storage works.
+**The `default` entry.** It describes the cluster's normal runtime with no `runtimeClassName`. Its `state` is derived from the expectations of the node groups that can run pods (every group whose configured maximum size is above zero): `qualified` if all of them are qualified, `unsupported` if all of them are unsupported, and `unknown` otherwise, including a mix of qualified and unsupported groups. `capabilities` lists `process-self-restriction` only when the state is `qualified`; under `unknown` or `unsupported` it is empty, and the per-group report says which groups are the reason. An operator may still pass the values to a pack under `unknown`: the pack's startup check decides on each node, and NIC blocks nothing. The security settings meet Pod Security `restricted`, each at the level it belongs: `runAsNonRoot` and `seccompProfile` at pod level, so they also cover init containers, and `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]` per container, where Kubernetes defines them. The pack still sets `runAsUser` where its image has no numeric non-root user.
+
+**Placement is reserved.** The `default` entry has no placement, and NIC labels no node groups for it. In a mixed cluster the pack's startup check refuses work on a node that does not qualify; steering pods away from such groups is future work (see Option 7 and the placement-label guidance below).
+
+**Extension space, not a frozen schema.** Only fields a consumer uses today are defined. These names are reserved for later entries, with their intended meaning: `runtimeClassName` (an exact class); `placement` (node selector, affinity and tolerations NIC renders, so packs never hardcode provider or node-group labels); `workspaceStorageClass` (a class known to work with that entry's runtime, with access-mode and ownership notes: the tested gVisor configuration could not write to EFS access points as NIC configures them, so storage is part of an entry, not a promise that any storage works); `profile` (settings such as a namespace); and `implementation` (release and property-set version). Consumers ignore fields they do not know. Adding a field or an entry keeps `version`; removing or redefining one, or changing what a value means, bumps it.
 
 Later entries may name `RuntimeClass`es NIC installs, one per implementation and named after it (`nebari-gvisor`, `nebari-kata`); provider-managed classes (AKS's `kata-vm-isolation`); or a class the operator owns on an `existing` cluster. Implementation names are NIC's convention for classes it installs, not a requirement on others. Level-named aliases were rejected: `RuntimeClass.handler` is immutable, so such a class cannot be moved from `runsc` to `kata` without deleting it; one class per level cannot serve two workloads that need different properties at the same level; and the ecosystem names runtimes directly. NIC may label its classes `sandbox.nebari.dev/level: <level>` as inventory metadata for its own tooling. For capabilities backed by a `RuntimeClass`, placement can also use the class's own `scheduling` field, which Kubernetes merges into pods.
 
@@ -204,7 +208,7 @@ type SandboxSettings struct {
 
 type NodeGroupSandbox struct {
     Expectation Expectation
-    Placement   map[string]string // a label NIC sets on this group via provider config; nil if none
+    CanRunPods  bool // false when the configured maximum size is zero; not counted in the entry's state
 }
 
 type Expectation struct {
@@ -214,15 +218,19 @@ type Expectation struct {
 }
 
 // Computed by pkg/nic from InfraSettings and config; shown by nic outputs.
+type Mapping struct {
+    Version      int // 1; bumped only by an incompatible change
+    Requirements map[string]Requirement
+}
+
+// Only fields used today. Reserved for later entries, not yet defined:
+// RuntimeClassName, Placement, WorkspaceStorageClass, Profile, Implementation.
 type Requirement struct {
-    Level                 string
-    Capabilities          []string
-    RuntimeClassName      string
-    Placement             Placement // nodeSelector, affinity, tolerations
-    SecurityContext       *corev1.PodSecurityContext
-    WorkspaceStorageClass StorageClassRef
-    Profile               map[string]string // reserved
-    Implementation        Implementation    // release and property-set version; reserved
+    Level                    string
+    State                    string   // "qualified", "unknown" or "unsupported"
+    Capabilities             []string // process-self-restriction only when State is "qualified"
+    PodSecurityContext       *corev1.PodSecurityContext // runAsNonRoot, seccompProfile
+    ContainerSecurityContext *corev1.SecurityContext    // allowPrivilegeEscalation, capabilities
 }
 
 // Computed live by nic outputs; never stored.
@@ -324,14 +332,14 @@ Today, conditional software ([ADR-0006](../../adr/0006-conditional-foundational-
 
 ## 20.8 Delivery: `process-self-restriction`
 
-ADR-0021 delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox.
+ADR-0021 delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox. NIC reports an incompatible cluster but does not block `nic deploy`; enforcement is the pack's startup check. An operator option that makes a requirement fail the deploy can be added later without changing the mapping.
 
 1. **No opt-in, no relaxation, no components, no configuration.** No profiles, no operator, no admission exception and no node preparation. Steps 3-4 of the lifecycle are empty. A cluster-wide minimum-ABI setting was considered and dropped: one number ignores the runtime (gVisor has no Landlock), cannot judge node groups with no nodes or images nobody has probed, and duplicates the pack's own startup check, which is where the guarantee is enforced.
 2. **Qualified expectations.** Each provider reports, per node group and from config alone, the expectation the qualification record (below) gives for that group's configuration: `qualified` with an ABI for a configuration inside a record's extrapolation range, `unsupported` where the kernel line is known to be below ABI 3, and `unknown` otherwise. Not every default node group on a supported Kubernetes version qualifies: AWS below 1.33 (kernel 6.1, ABI 2) and AKS below 1.35 (Ubuntu 22.04, kernel 5.15, ABI 1) are unsupported; AKS from 1.35, AWS AMI types other than `AL2023_x86_64_STANDARD` (including ARM, NVIDIA and Bottlerocket), images an operator pins, `existing` and kind are unknown. NIC does **not** change node images on its own; moving a group to a qualifying image is an operator change through the provider's own config.
-3. **Reporting and the preflight.** `nic outputs` reads the nodes afresh each time it runs and shows, per node group, the qualified expectation and the host-kernel baseline, labelled "default runtime only" and with the time of the read; nodes the provider's `NodeGroupOf` cannot place are listed as `unassigned`, and groups with no nodes are `not checked`. `nic deploy` prints the same report once the nodes are up. The baseline maps each node's `node.status.nodeInfo.kernelVersion` to the Landlock ABI that kernel version introduced upstream: 5.13 ABI 1, 5.19 ABI 2, 6.2 ABI 3, 6.7 ABI 4, 6.10 ABI 5, 6.12 ABI 6, 6.15 ABI 7. It never warns or fails, is not stored, and is never read as a qualification, because three things defeat it: distribution backports (a lower version with a newer ABI), Landlock built in but not enabled at boot (`EOPNOTSUPP`), and container-runtime seccomp profiles that predate the Landlock system calls and deny them. Nodes added later (autoscaling, replacement) are seen only by the next read.
-4. **Probe and requalification.** The probe ([`tests/sandbox-probe/`](../../../tests/sandbox-probe/README.md)) is the evidence behind each record entry. NIC maintainers run it through the release checklist on a fresh node of each configuration before it is recorded, and again on any **requalification trigger**: a new node-image revision line or kernel line; changed kernel configuration or boot options (for example the LSM list); a container runtime upgrade or a change to its default seccomp profile; a new architecture; or storage becoming part of a promise. It is not run on users' clusters. A non-root pod with every capability dropped and `RuntimeDefault` applies a Landlock ruleset and confirms a denied write and truncation fail, reports the highest ABI, at ABI 4 confirms a disallowed `connect` and `bind` fail, and records `/sys/kernel/security/lsm`. Each denial has a positive control on the same node, so an unrelated failure cannot pass as confinement. The same run checks `seccomp-user-notification` (two stacked filters, listener transfer, `SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SEND`) and reports it separately.
-5. **Reference consumer.** The example below is committed with its end-to-end test under [`tests/sandbox-probe/recipe/`](../../../tests/sandbox-probe/recipe/). It is the qualified consumer of `process-self-restriction`; the code is an example, not part of the contract.
-6. **Documentation.** A pack-developer page (copy the `default` values, do not mount the service-account token, check the Landlock ABI at startup, refuse sandboxed work rather than fall back, the example below) and an operator page (the qualification record, what `nic outputs` reports and what each state means).
+3. **Reporting and the preflight.** `nic outputs` reads the nodes afresh each time it runs and shows, per node group, the qualified expectation and the host-kernel baseline, labelled "default runtime only" and with the time of the read; nodes the provider's `NodeGroupOf` cannot place are listed as `unassigned`, and groups with no nodes are `not checked`. `nic deploy` prints the same report once the nodes are up. The baseline maps each node's `node.status.nodeInfo.kernelVersion` to the Landlock ABI that kernel version introduced upstream: 5.13 ABI 1, 5.19 ABI 2, 6.2 ABI 3, 6.7 ABI 4, 6.10 ABI 5, 6.12 ABI 6, 6.15 ABI 7. It never warns or fails, is not stored, and is never read as a qualification, because three things defeat it: distribution backports (a lower version with a newer ABI), Landlock built in but not enabled at boot (`EOPNOTSUPP`), and container-runtime seccomp profiles that predate the Landlock system calls and deny them. Nodes added later (autoscaling, replacement) are seen only by the next read. The `default` entry's state follows from the per-group expectations (§20.6). NIC labels no node groups for this delivery; the per-group report is diagnostic.
+4. **Probe and requalification.** The probe ([`tests/sandbox-probe/`](../../../tests/sandbox-probe/README.md)) is the qualified consumer of `process-self-restriction` and the evidence behind each record entry. NIC maintainers run it on a fresh node of each configuration before it is recorded, following the probe's [requalification procedure](../../../tests/sandbox-probe/README.md#requalification), and again whenever a node leaves a record's extrapolation range (below). It is not run on users' clusters. A non-root pod with every capability dropped and `RuntimeDefault` applies a Landlock ruleset and confirms a denied write and truncation fail, reports the highest ABI, at ABI 4 confirms a disallowed `connect` and `bind` fail, and records `/sys/kernel/security/lsm`. Each denial has a positive control on the same node, so an unrelated failure cannot pass as confinement. The probe reports three separate verdicts: `landlock_fs`; `landlock_tcp`, evaluated at ABI 4 or newer, where the record advertises TCP confinement, and failing if a forbidden `connect` or `bind` succeeded or the network check errored; and `seccomp_user_notification` (two stacked filters, listener transfer, `SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SEND`). Its `process_self_restriction` verdict needs `landlock_fs` to pass and `landlock_tcp` not to fail, and does not depend on seccomp notification. In qualification mode the probe exits non-zero when a property being qualified fails; `--diagnostic` prints the same result and always exits 0, and is not a gate.
+5. **Reference launcher.** The example below is committed with its unit and end-to-end tests under [`tests/sandbox-probe/recipe/`](../../../tests/sandbox-probe/recipe/). It is a reference consumer, tested on local VMs and containers and in CI, awaiting provider qualification: it has not been run on the qualified EKS or Hetzner configurations, whose qualification rests on the probe. The code is an example, not part of the contract.
+6. **Documentation.** A pack-developer page (copy the `default` values, do not mount the service-account token, check the Landlock ABI at startup, refuse sandboxed work rather than fall back, treat the work directory as untrusted input, the example below) and an operator page (the qualification record, what `nic outputs` reports and what each state means).
 
 ### Qualification record
 
@@ -339,33 +347,48 @@ The record lists what has been qualified, not every image: unknown combinations 
 
 | Provider, image variant, architecture | Tested image release | Kernel | Container runtime | Pod settings | Probe revision | ABI | Date | Extrapolation range |
 |---|---|---|---|---|---|---|---|---|
-| `aws`, EKS `AL2023_x86_64_STANDARD`, x86_64 (`m6i.large`), Kubernetes 1.34 | AMI release 2023.12.20261012 | 6.12.111-136.204.amzn2023 | containerd 2.3.5 | `pod.yaml` (UID 65532, no capabilities, read-only root, `RuntimeDefault`; also unset) | probe 0.1.0 | 6 | 2026-10-19 | Same variant and architecture on the 6.12 kernel line (Kubernetes 1.33–1.35) |
-| `hetzner`, hetzner-k3s Ubuntu 24.04, x86_64 | Ubuntu 24.04.4 LTS | 6.8.0-138-generic | containerd 2.2.7-k3s1 | As above | probe 0.1.0 | 4 | 2026-10-25 | Ubuntu 24.04 GA kernel line (6.8) on x86_64 |
+| `aws`, EKS `AL2023_x86_64_STANDARD`, x86_64 (`m6i.large`), Kubernetes 1.34 | AMI release 2023.12.20261012 | 6.12.111-136.204.amzn2023 | containerd 2.3.5 | `pod.yaml` (UID 65532, no capabilities, read-only root, `RuntimeDefault`; also unset) | probe 0.1.0 | 6 | 2026-10-19 | `AL2023_x86_64_STANDARD` on x86_64, 6.12 kernel line (Kubernetes 1.33–1.35), containerd 2.3 |
+| `hetzner`, hetzner-k3s Ubuntu 24.04, x86_64 | Ubuntu 24.04.4 LTS | 6.8.0-138-generic | containerd 2.2.7-k3s1 | As above | probe 0.1.0 | 4 | 2026-10-25 | Ubuntu 24.04 on x86_64, GA kernel line (6.8), containerd 2.2 (k3s) |
+
+**Extrapolation range.** An entry extends only to nodes with the same image variant and architecture, the same kernel line and the same container runtime minor version; within it, a new image or kernel revision keeps the expectation. Anything else is unknown until re-probed, including a new kernel line, a runtime minor upgrade, a changed default seccomp profile and a changed boot-time LSM list. The recorded results were taken with probe 0.1.0; their verdict fields were recomputed from the recorded raw fields by probe 0.2.0 (`--rederive`), which is deterministic and needs no rerun.
 
 Unsupported, from the kernel line: AWS AL2023 on 6.1 (Kubernetes 1.31–1.32, ABI 2); AKS Ubuntu 22.04 (5.15, ABI 1). Everything else is unknown until probed, including AL2023 on 6.18 (Kubernetes 1.36–1.37), every arm64 image, GPU images, Bottlerocket, AKS on Ubuntu 24.04 or Azure Linux, `existing` and kind. (kind on a 6.8 Colima VM, 2026-10-15, passed the probe at ABI 4; that is a local observation, not a qualification, since kind's kernel is the host's.)
 
 ### Example: confining a command
 
-This is the reference consumer: a **tested reference launcher** for the default runtime, not a library NIC ships and not part of the contract. It runs non-root under Pod Security `restricted` with no added capability. Everything shown in the code below was tested end to end (below); the optional seccomp user-notification mediation mentioned at the end is a capability demonstration in the probe, not part of this launcher.
+This is a **reference launcher** for the default runtime: a reference consumer of `process-self-restriction`, tested on local VMs and containers and in CI, awaiting qualification on provider nodes. It is not a library NIC ships and not part of the contract. It runs non-root under Pod Security `restricted` with no added capability. The optional seccomp user-notification mediation mentioned at the end is a capability demonstration in the probe, not part of this launcher.
 
-The agent never confines itself. It starts a **helper**, its own binary re-executed through `/proc/self/exe` with `os/exec`, passing the policy and the command as arguments, a minimal explicit environment (`PATH`, `HOME` and `TMPDIR` set to the work directory, `LANG`) and only standard input, output and error. The helper refuses below Landlock ABI 3, then restricts itself and executes the command, which inherits the restriction and cannot lift it:
+The agent never confines itself. It starts a **helper**, its own binary re-executed through `/proc/self/exe` with `os/exec`, passing the policy and the command as arguments, a minimal explicit environment (`PATH`, `HOME` and `TMPDIR` set to the work directory, `LANG`) and only standard input, output and error. The helper checks the policy against the kernel's Landlock ABI and, if the kernel cannot enforce all of it, refuses before executing anything. Otherwise it restricts itself and executes the command, which inherits the restriction and cannot lift it:
 
-- **Landlock** through [go-landlock](https://github.com/landlock-lsm/go-landlock) (v0.11.0), in best-effort mode on its newest ABI, so every right the running kernel knows is handled, including all creation and removal rights (`MAKE_DIR`, `MAKE_SYM`, `MAKE_SOCK`, `MAKE_FIFO`, `MAKE_CHAR`, `MAKE_BLOCK`, `REMOVE_DIR`), `REFER` at ABI 2, `TRUNCATE` at ABI 3 and `IOCTL_DEV` at ABI 5, and, on newer kernels, pathname Unix-socket connection (ABI 9) and UDP (ABI 10). It grants everything beneath the work directory, including moves and links within it (`REFER`; without it, legitimate moves inside the workspace fail) and connecting to sockets there; read and execute beneath listed system paths; read and write on listed files such as `/dev/null`; and at ABI 4 TCP `connect` to one proxy port only and no `bind`. At ABI 6 the command cannot signal, or reach abstract Unix sockets of, processes outside the sandbox. Best effort silently does less on older kernels, which is why the helper checks the ABI first. The library also sets `no_new_privs`.
+- **The policy states what it requires.** Its TCP mode is `proxy-port` (connect to one port, no `bind`), `deny` (no TCP `connect` or `bind`) or `unrestricted` (filesystem only). The first two need ABI 4, the third ABI 3. There is no default: a policy with no mode, an unknown field or a port in the wrong mode is refused.
+- **Landlock** through [go-landlock](https://github.com/landlock-lsm/go-landlock) (v0.11.0), in two stacked domains. The first is strict: the filesystem rights of ABI 3 (every creation and removal right, `REFER` and `TRUNCATE`) and, unless TCP is unrestricted, TCP `connect` and `bind` from ABI 4; go-landlock fails rather than drop any of them. The second, from ABI 5, is best effort with the same grants and adds what newer kernels have: `IOCTL_DEV` (ABI 5), signal and abstract-socket scoping (ABI 6), pathname Unix-socket `connect` (ABI 9) and, unless TCP is unrestricted, UDP (ABI 10). Access must pass every domain, so the best-effort domain can only take access away and never weakens the strict one. The grants: everything beneath the work directory, including moves and links within it (`REFER`; without it, legitimate moves inside the workspace fail) and connecting to sockets there; read and execute beneath listed system paths; read and write on listed files such as `/dev/null`; and, with `proxy-port`, TCP `connect` to that port. The library also sets `no_new_privs`.
 - **Reads are restricted** to the work directory and the listed paths (for example `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/proc`), so files elsewhere, including a mounted service-account token, cannot be read. The pack should still not mount the token, and must not put credentials in the listed paths or the work directory.
-- **Optional strict mode** adds a seccomp filter, built with raw `x/sys/unix` calls because go-landlock does not cover seccomp, that makes `socket()` fail for `AF_INET`, `AF_INET6`, `AF_PACKET` and `AF_NETLINK` while leaving `AF_UNIX` for a proxy socket in the work directory, and refuses `io_uring` and foreign or x32 system calls.
+- **Optional non-Unix socket restriction** (`unixSocketsOnly`) adds a seccomp filter, built with raw `x/sys/unix` calls because go-landlock does not cover seccomp, under which `socket()` succeeds only for `AF_UNIX`. It is an allowlist, so `AF_VSOCK`, `AF_ALG`, `AF_PACKET`, `AF_NETLINK` and any other family fail with `EPERM` as well as `AF_INET` and `AF_INET6`. It also refuses `io_uring` and foreign or x32 system calls. It works from ABI 3, so with `tcp: unrestricted` it denies IP networking where TCP rules are unavailable.
 - **Descriptors** other than 0, 1 and 2 are marked close-on-exec with `close_range` before `execve`, so a descriptor the agent leaked without `O_CLOEXEC` does not reach the command.
 
 ```go
-// Policy is what a confined command may do.
+// Policy is what a confined command may do. Every field is stated; nothing
+// is inferred from what the kernel happens to support.
 type Policy struct {
-	WorkDir   string   // read, write, create, remove, move and link beneath it
-	ReadOnly  []string // read and execute beneath, e.g. /usr, /etc, /proc
-	ReadWrite []string // read and write, e.g. /dev/null
-	ProxyPort uint16   // ABI 4+: the only TCP port connect may use; 0 for none
-	NoInet    bool     // seccomp: no IP, packet or netlink sockets at all
+	WorkDir   string   `json:"workDir"`   // read, write, create, remove, move and link beneath it
+	ReadOnly  []string `json:"readOnly"`  // read and execute beneath, e.g. /usr, /etc, /proc
+	ReadWrite []string `json:"readWrite"` // read and write, e.g. /dev/null
+	// TCP is "proxy-port" (connect to ProxyPort only, no bind), "deny" (no
+	// connect or bind) or "unrestricted" (Landlock leaves TCP alone). The first
+	// two need Landlock ABI 4; the command is refused on older kernels.
+	TCP       string `json:"tcp"`
+	ProxyPort uint16 `json:"proxyPort,omitempty"` // with "proxy-port" only
+	// UnixSocketsOnly adds a seccomp filter under which socket() succeeds only
+	// for AF_UNIX: no IP, packet, netlink, vsock or other sockets.
+	UnixSocketsOnly bool `json:"unixSocketsOnly,omitempty"`
 }
 
-const confineArg = "__confine"
+const (
+	confineArg      = "__confine"
+	TCPProxyPort    = "proxy-port"
+	TCPDeny         = "deny"
+	TCPUnrestricted = "unrestricted"
+)
 
 // Agent side: run argv under p in a fresh helper (this binary, re-executed),
 // with a minimal environment and only stdin, stdout and stderr.
@@ -390,22 +413,25 @@ func confinedCommand(p Policy, argv ...string) (*exec.Cmd, error) {
 //	}
 func confineAndExec(policyJSON string, argv []string) error {
 	var p Policy
-	if err := json.Unmarshal([]byte(policyJSON), &p); err != nil || len(argv) == 0 {
+	decoder := json.NewDecoder(bytes.NewReader([]byte(policyJSON)))
+	decoder.DisallowUnknownFields() // a misspelt or retired field must not be ignored
+	if err := decoder.Decode(&p); err != nil || len(argv) == 0 {
 		return errors.Join(errors.New("bad policy or empty command"), err)
+	}
+	abi := landlockABI()
+	if err := p.check(abi); err != nil {
+		return err // refuse rather than run the command with less than the policy says
 	}
 	path, err := exec.LookPath(argv[0])
 	if err != nil {
 		return err
 	}
-	if landlockABI() < 3 { // best effort would silently do less: refuse instead
-		return errors.New("Landlock ABI 3 or newer is required")
-	}
 	runtime.LockOSThread() // the seccomp filter applies to this thread, which then execs
-	if err := applyLandlock(p); err != nil {
+	if err := applyLandlock(p, abi); err != nil {
 		return err
 	}
-	if p.NoInet {
-		if err := denyInetSockets(); err != nil {
+	if p.UnixSocketsOnly {
+		if err := allowOnlyUnixSockets(); err != nil {
 			return err
 		}
 	}
@@ -415,9 +441,27 @@ func confineAndExec(policyJSON string, argv []string) error {
 	return unix.Exec(path, argv, os.Environ())
 }
 
+// check refuses a policy the running kernel cannot enforce in full.
+func (p Policy) check(abi int) error {
+	switch {
+	case p.WorkDir == "":
+		return errors.New("policy has no workDir")
+	case p.TCP != TCPProxyPort && p.TCP != TCPDeny && p.TCP != TCPUnrestricted:
+		return fmt.Errorf("policy tcp must be %q, %q or %q", TCPProxyPort, TCPDeny, TCPUnrestricted)
+	case (p.TCP == TCPProxyPort) != (p.ProxyPort != 0):
+		return errors.New("policy proxyPort is required with tcp proxy-port and invalid otherwise")
+	case abi < 3:
+		return fmt.Errorf("Landlock ABI 3 or newer is required, have %d", abi)
+	case p.TCP != TCPUnrestricted && abi < 4:
+		return fmt.Errorf("tcp %q needs Landlock ABI 4 or newer, have %d", p.TCP, abi)
+	}
+	return nil
+}
+
 // landlockABI returns the kernel's Landlock ABI, or 0 if Landlock is absent
-// (ENOSYS) or not enabled at boot (EOPNOTSUPP).
-func landlockABI() int {
+// (ENOSYS) or not enabled at boot (EOPNOTSUPP). It is a variable so that a
+// test can stand in for an older kernel.
+var landlockABI = func() int {
 	abi, err := llsyscall.LandlockGetABIVersion()
 	if err != nil {
 		return 0
@@ -425,31 +469,46 @@ func landlockABI() int {
 	return abi
 }
 
-// applyLandlock handles every right go-landlock knows (V11), degrading to what the
-// running kernel supports, and grants: everything beneath the work directory,
-// including moves and links within it (REFER) and connecting to Unix sockets
-// there; read and execute beneath p.ReadOnly; read and write on p.ReadWrite;
-// and, at ABI 4+, TCP connect to p.ProxyPort only. At ABI 6+ the command may
-// not signal, or reach abstract Unix sockets of, processes outside the sandbox.
-// It also sets no_new_privs.
-func applyLandlock(p Policy) error {
+// applyLandlock grants everything beneath the work directory, including moves
+// and links within it (REFER) and connecting to Unix sockets there; read and
+// execute beneath p.ReadOnly; read and write on p.ReadWrite; and, with
+// "proxy-port", TCP connect to p.ProxyPort. It also sets no_new_privs.
+//
+// It restricts twice, and each restriction adds a stacked Landlock domain
+// that can only take access away. The first is strict: the filesystem rights
+// of ABI 3 and, unless TCP is unrestricted, TCP connect and bind of ABI 4; it
+// fails rather than do less. The second, from ABI 5, is best effort with the
+// same grants and adds whatever newer rights the kernel has: device ioctls
+// (ABI 5), signals and abstract Unix sockets outside the sandbox (ABI 6),
+// pathname Unix sockets outside the work directory (ABI 9) and, unless TCP
+// is unrestricted, UDP (ABI 10).
+func applyLandlock(p Policy, abi int) error {
 	rules := []landlock.Rule{
 		landlock.RWDirs(p.WorkDir).WithRefer().WithResolveUnix(),
 		landlock.RODirs(p.ReadOnly...).IgnoreIfMissing(),
 		landlock.RWFiles(p.ReadWrite...).IgnoreIfMissing(),
 	}
-	if p.ProxyPort != 0 {
+	if p.TCP == TCPProxyPort {
 		rules = append(rules, landlock.ConnectTCP(p.ProxyPort))
 	}
-	return landlock.V11.BestEffort().Restrict(rules...)
+	required, extra := landlock.V4, landlock.V11
+	if p.TCP == TCPUnrestricted {
+		required, extra.HandledAccessNet = landlock.V3, 0
+	}
+	if err := required.Restrict(rules...); err != nil {
+		return err
+	}
+	if abi < 5 {
+		return nil // nothing newer to add
+	}
+	return extra.BestEffort().Restrict(rules...)
 }
 
-// denyInetSockets installs a seccomp filter that makes socket() fail with
-// EPERM for AF_INET, AF_INET6, AF_PACKET and AF_NETLINK (AF_UNIX stays
-// available, for example for a proxy socket in the work directory). It also
-// refuses io_uring, which can create sockets without calling socket(), and
-// any syscall from a foreign or x32 ABI.
-func denyInetSockets() error {
+// allowOnlyUnixSockets installs a seccomp filter under which socket() fails
+// with EPERM for every address family except AF_UNIX. It also refuses
+// io_uring, which can create sockets without calling socket(), and any
+// syscall from a foreign or x32 ABI.
+func allowOnlyUnixSockets() error {
 	arch := map[string]uint32{"amd64": unix.AUDIT_ARCH_X86_64, "arm64": unix.AUDIT_ARCH_AARCH64}[runtime.GOARCH]
 	const (
 		ld, jeq, jge, ret = unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
@@ -460,15 +519,12 @@ func denyInetSockets() error {
 		{Code: ld, K: 4}, // seccomp_data.arch
 		{Code: jeq, Jt: 1, K: arch},
 		{Code: ret, K: deny},
-		{Code: ld, K: 0}, // seccomp_data.nr
-		{Code: jge, Jt: 8, K: 0x40000000}, // x32
-		{Code: jeq, Jt: 7, K: unix.SYS_IO_URING_SETUP},
-		{Code: jeq, Jf: 5, K: unix.SYS_SOCKET},
+		{Code: ld, K: 0},                  // seccomp_data.nr
+		{Code: jge, Jt: 5, K: 0x40000000}, // x32
+		{Code: jeq, Jt: 4, K: unix.SYS_IO_URING_SETUP},
+		{Code: jeq, Jf: 2, K: unix.SYS_SOCKET},
 		{Code: ld, K: 16}, // low 32 bits of args[0], the address family
-		{Code: jeq, Jt: 4, K: unix.AF_INET},
-		{Code: jeq, Jt: 3, K: unix.AF_INET6},
-		{Code: jeq, Jt: 2, K: unix.AF_PACKET},
-		{Code: jeq, Jt: 1, K: unix.AF_NETLINK},
+		{Code: jeq, Jf: 1, K: unix.AF_UNIX},
 		{Code: ret, K: unix.SECCOMP_RET_ALLOW},
 		{Code: ret, K: deny},
 	}
@@ -477,12 +533,24 @@ func denyInetSockets() error {
 }
 ```
 
-A pack runs it with, for example, `Policy{WorkDir: work, ReadOnly: []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc"}, ReadWrite: []string{"/dev/null"}, ProxyPort: 8080}`.
+A pack runs it with, for example, `Policy{WorkDir: work, ReadOnly: []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc"}, ReadWrite: []string{"/dev/null"}, TCP: TCPProxyPort, ProxyPort: 8080}`.
 
-**What is tested.** On 2026-10-28, `tests/sandbox-probe/recipe/test.sh` ran every case through the helper and as an unconfined control (which must succeed, so a denial is not an unrelated failure), as a non-root user, with the agent holding a canary secret in its environment and a leaked writable descriptor. Environments: Lima VMs on Apple silicon (aarch64), Ubuntu 24.04 (kernel 6.8.0-134-generic, Landlock ABI 4) and Ubuntu 25.04 (6.14.0-37-generic, ABI 6), each directly as UID 501 and inside a container (`nerdctl run --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges`, `python:3.12-slim`, containerd's default seccomp profile, a stand-in service-account token mounted). Results: 35 of 35 cases passed on each VM and 36 of 36 in each container.
+**What is tested.** On 2026-10-28, as a non-root user. `recipe/test.sh` runs every case through the helper and as an unconfined control (which must succeed, so a denial is not an unrelated failure), with the agent holding a canary secret in its environment and a leaked writable descriptor. Rows are `PASS`, `LIMIT` (reachable as documented for that ABI: a known gap, not confinement), `SKIP` (the container's own seccomp profile already denies it, so the launcher's denial cannot be told apart) or `FAIL`. The unit tests check every policy refusal, and run the helper with the ABI it sees capped at 3, 2 or 0 to show that a policy the kernel cannot enforce stops the command before it executes, against a positive control that does execute.
+
+| Environment | Kernel, Landlock ABI | Launcher end to end | Unit tests | Probe |
+|---|---|---|---|---|
+| Lima VM, Ubuntu 24.04, aarch64, UID 501 | 6.8.0-134-generic, 4 | 49 pass, 8 limit, 0 fail | Pass | All four verdicts pass |
+| The same VM, container (`nerdctl run --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges`, `python:3.12-slim`, containerd's default seccomp profile, a stand-in service-account token mounted) | 6.8.0-134-generic, 4 | 47 pass, 8 limit, 3 skip, 0 fail | Pass | All pass (`seccomp_mode` 2) |
+| Lima VM, Ubuntu 25.04, aarch64, UID 501 | 6.14.0-37-generic, 6 | 53 pass, 4 limit, 0 fail | Pass | All pass |
+| The same VM, container as above | 6.14.0-37-generic, 6 | 51 pass, 4 limit, 3 skip, 0 fail | Pass | All pass |
+| Lima VM, Ubuntu 24.04, x86_64 (emulated), UID 501 | 6.8.0-134-generic, 4 | 49 pass, 8 limit, 0 fail | Pass | All pass |
+| The same VM, container as above | 6.8.0-134-generic, 4 | 47 pass, 8 limit, 3 skip, 0 fail | Pass | All pass |
+| Lima VM, Ubuntu 22.04, aarch64, UID 501 | 5.15.0-185-generic, 1 | Every policy refused before executing (6 of 6 refusal rows); confinement unsupported, reported as such | Pass (positive control skipped) | `landlock_fs` fails, exit 1 |
+| The CI job's steps (Go 1.26.9) in the x86_64 VM above | 6.8.0-134-generic, 4 | `NIC_RECIPE_E2E=1 go test ./recipe/` passed (49 pass, 8 limit) | `go vet`, `go build`, `go test` pass | Not run |
 
 | Case | ABI 4 | ABI 6 |
 |---|---|---|
+| A `proxy-port` or `deny` policy below ABI 4, any policy below ABI 3, a policy with no TCP mode, an unknown field or a port in the wrong mode | Refused before executing | Refused before executing |
 | Write, `mkdir`, symlink and move between directories inside the work directory | Allowed | Allowed |
 | Create, append, truncate, remove, `mkdir`, symlink (planting, for example `~/.gitconfig`), `rmdir`, `mkfifo`, bind a Unix socket, or move a file out, outside the work directory | Denied | Denied |
 | Grandchild of the command writes outside | Denied | Denied |
@@ -490,17 +558,23 @@ A pack runs it with, for example, `Policy{WorkDir: work, ReadOnly: []string{"/us
 | Read a file outside the listed paths (the agent's home, `/var`, the stand-in token) | Denied | Denied |
 | Read the agent's environment through `/proc/<pid>/environ` | Denied | Denied |
 | Agent's canary in the command's environment; write through the leaked descriptor | Absent; denied | Absent; denied |
-| TCP `connect` to the proxy port, also at another address | Allowed | Allowed |
-| TCP `connect` to another port; TCP `bind` | Denied | Denied |
-| UDP send; connect to a pathname Unix socket outside the work directory | Allowed (not covered below ABI 10 and 9) | Allowed (as at ABI 4) |
-| `chmod` a file outside (metadata) | Allowed (not covered) | Allowed (not covered) |
-| Connect to an abstract Unix socket, or signal the agent or another process, outside the sandbox | Allowed (not covered below ABI 6) | Denied |
-| Strict mode: TCP to the proxy port, UDP, IPv6 and netlink sockets | Denied | Denied |
-| Strict mode: Unix socket to a proxy in the work directory; ordinary commands | Allowed | Allowed |
+| `proxy-port`: TCP `connect` to the proxy port, also at another address | Allowed | Allowed |
+| `proxy-port`: TCP `connect` to another port; TCP `bind` | Denied | Denied |
+| `deny`: TCP `connect` to any port; TCP `bind` | Denied | Denied |
+| `unrestricted`: TCP `connect` to any port, UDP send; a write outside is still denied | Allowed; denied | Allowed; denied |
+| UDP send under `proxy-port` | Limit (not covered below ABI 10) | Limit |
+| `chmod` a file outside (metadata) | Limit (not covered) | Limit |
+| Connect to a pathname Unix socket outside the work directory, in every mode including non-Unix socket restriction | Limit (not covered below ABI 9) | Limit |
+| Connect to an abstract Unix socket, or signal the agent or another process, outside the sandbox | Limit (not covered below ABI 6) | Denied |
+| Non-Unix socket restriction: `socket()` for `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`, `AF_ALG`, `AF_VSOCK`, and `io_uring_setup` | `EPERM` from the filter, where the control gets the kernel's own answer (`EINVAL` for an invalid socket type, `EFAULT`); in containers `AF_ALG`, `AF_VSOCK` and `io_uring` skip | As at ABI 4 |
+| Non-Unix socket restriction: `AF_UNIX` reaches the kernel; TCP to the proxy port, UDP, IPv6 and netlink sockets in real use | Reaches it; denied | Reaches it; denied |
+| Non-Unix socket restriction: Unix socket to a proxy in the work directory; ordinary commands | Allowed | Allowed |
 
-Not tested: kernels at ABI 3, 5 or 7 and above, x86_64 (the binary builds for it), and a Kubernetes pod; the probe covers the Kubernetes pod settings.
+The CI job "Sandbox probe" runs the same steps on an `ubuntu-24.04` runner (x86_64); below ABI 3 its end-to-end step is skipped with a warning, never reported as passed. Not tested: kernels at ABI 3, 5 or 7 and above (ABI 3 refusal is covered by the capped-ABI unit test), and a Kubernetes pod or a provider node; the probe covers the Kubernetes pod settings, and the launcher awaits provider qualification.
 
-**Limits.** Landlock does not cover metadata changes (`chmod`, `chown`, timestamps), descriptors already open when the restriction is applied (hence `close_range`), or anything the agent passes in on purpose: sandboxing a whole agent protects its surroundings from the agent, not credentials deliberately given to the agent from prompt-injected decisions. Port rules check the port, not the address, so without strict mode a command may reach any host on the proxy port; below ABI 10 they do not cover UDP, and below ABI 9 pathname Unix sockets the command can name stay reachable, so keep such sockets out of its view. Without ABI 6, keep the agent's abstract sockets and process out of reach by other means (for example a separate user). Strict mode leaves pathname Unix sockets, so the only network route is whatever proxy listens on one. Landlock does not stop kernel exploits (§20.11).
+**Limits.** Landlock does not cover metadata changes (`chmod`, `chown`, timestamps), descriptors already open when the restriction is applied (hence `close_range`), or anything the agent passes in on purpose: sandboxing a whole agent protects its surroundings from the agent, not credentials deliberately given to the agent from prompt-injected decisions. Port rules check the port, not the address, so a `proxy-port` command may reach any host on the proxy port; below ABI 10 they do not cover UDP. Below ABI 9 the command can connect to pathname Unix sockets outside the work directory that it can name, and below ABI 6 to abstract sockets and signal processes outside the sandbox. Non-Unix socket restriction does not change that, so a Unix-socket proxy is the only network route only where no other Unix service is reachable from the command: a deployment precondition the pack must ensure (for example, the agent's own sockets and process run as a separate user or outside the pod), or else a separate execution environment. Landlock does not stop kernel exploits (§20.11).
+
+**The workspace is untrusted input.** Files a confined command writes inside the work directory can be executed later by the unconfined agent or its tools: a `.git/config` with `core.fsmonitor` or hooks runs on the agent's next `git status`, an `.envrc` on entering the directory with direnv, a `conftest.py` on the next `pytest`. Landlock confines the command, not what the agent later does with its output. The agent must treat the workspace as untrusted input: run tools there through the launcher too, or with hardened invocations (for example `git -c core.fsmonitor= -c core.hooksPath=/dev/null`, and no automatic environment loading).
 
 **Optionally, mediate system calls.** A pack that hands the command descriptors (for example a connection to a proxy) can install, before `execve`, a second seccomp filter that returns `SECCOMP_RET_USER_NOTIF` for chosen system calls and pass the listener to a supervisor that answers with `SECCOMP_IOCTL_NOTIF_ADDFD` and `SECCOMP_ADDFD_FLAG_SEND`. That is `seccomp-user-notification`, reserved and demonstrated only by the probe; it must not be used as a check-then-continue policy (§20.11).
 
@@ -803,8 +877,8 @@ On a Hetzner cluster deployed with NIC (Ubuntu 24.04, kernel 6.8, k3s with conta
 
 ## 20.10 Verification
 
-- **Per node group, then per node.** For `process-self-restriction`, NIC reports each node's kernel baseline when `nic outputs` runs, for diagnosis only, and the probe runs only in maintainers' release testing unless automating it is adopted (§20.8). Where probes are used, they run on each node group that should provide a capability, placed with that capability's own selectors and tolerations. For Phase 2, the per-node probe also gates the readiness barrier.
-- **Primitive tests, in both directions.** For `process-self-restriction`: the probe's Landlock cases and the reference consumer's end-to-end test in §20.8, each denial with a positive control. For `in-pod-namespaces` inside gVisor: the capability test and qualified configurations succeed with the published settings. Filtered implementation (deferred): the qualified invocation succeeds with the profile; a pod without the profile on the same node cannot create a user namespace; netfilter and raw-socket creation fail from inside a new user namespace.
+- **Per node group, then per node.** For `process-self-restriction`, NIC reports each node's kernel baseline when `nic outputs` runs, for diagnosis only, and the probe runs only in maintainers' requalification runs unless automating it is adopted (§20.8). Where probes are used, they run on each node group that should provide a capability, placed with that capability's own selectors and tolerations. For Phase 2, the per-node probe also gates the readiness barrier.
+- **Primitive tests, in both directions.** For `process-self-restriction`: the probe's Landlock cases and the reference launcher's unit and end-to-end tests in §20.8, each denial with a positive control. For `in-pod-namespaces` inside gVisor: the capability test and qualified configurations succeed with the published settings. Filtered implementation (deferred): the qualified invocation succeeds with the profile; a pod without the profile on the same node cannot create a user namespace; netfilter and raw-socket creation fail from inside a new user namespace.
 - **Consumer acceptance test (Gate D).** Separately from the primitive, one real pack must show, with the capability in use:
   - credential canaries placed in the agent's environment, files and mounted secrets are not readable by sandboxed commands;
   - inherited file and socket descriptors are closed or explicitly allowed;
@@ -946,7 +1020,7 @@ It can be added later, without changing the capability's name or guarantee, if m
 - [bubblewrap](https://github.com/containers/bubblewrap)
 - [Landlock](https://docs.kernel.org/security/landlock.html)
 - [go-landlock](https://github.com/landlock-lsm/go-landlock)
-- [Sandbox probe and reference consumer](../../../tests/sandbox-probe/README.md)
+- [Sandbox probe and reference launcher](../../../tests/sandbox-probe/README.md)
 - [Kubernetes v1.36: User Namespaces GA](https://kubernetes.io/blog/2026/04/23/kubernetes-v1-36-userns-ga/)
 - [KEP-4265: ProcMount option](https://www.kubernetes.dev/resources/keps/4265/)
 - [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards)
