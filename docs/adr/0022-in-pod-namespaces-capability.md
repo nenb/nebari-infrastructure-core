@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021, which defines the capability contract and reserves the name `in-pod-namespaces`. Revised 2026-10-17: an unfiltered first implementation on AWS, with a NIC-owned seccomp profile as fallback. Revised 2026-10-28 after review: defines the capability, its qualified configurations and its capability test, with **no supported delivery route yet**; the unfiltered AL2023 result is recorded as evidence, not a product setting; bubblewrap inside gVisor is the intended first route; the NIC-owned profile is deferred. Detailed design and evidence are in the design doc [Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md), §20.5 and §20.9–§20.11.
+Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021, which defines the capability contract and reserves the name `in-pod-namespaces`. This sketch would also add requirement sets and a published requirement mapping to that contract, which ADR-0021 itself does not adopt ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#proposed-additions-requirement-sets-and-a-requirement-mapping)). Revised 2026-10-17: an unfiltered first implementation on AWS, with a NIC-owned seccomp profile as fallback. Revised 2026-10-28 after review: defines the capability, its qualified configurations and its capability test, with **no supported delivery route yet**; the unfiltered AL2023 result is recorded as evidence, not a product setting; bubblewrap inside gVisor is the intended first route; the NIC-owned profile is deferred. Detailed design and evidence are in the design doc [Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md), §20.5 and §20.9–§20.11.
 
 ## Date
 
@@ -130,7 +130,7 @@ Full assessments are in [§20.9](../design-doc/implementation/20-workload-sandbo
 
 ## Links
 
-- [ADR-0021: Gradual Workload Sandboxing Capability for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
+- [ADR-0021: Workload Sandboxing Capability Contract for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
 - [Design doc: Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md)
 - [ADR-0010: High-Security Mode](0010-high-security-mode.md)
 - [bubblewrap](https://github.com/containers/bubblewrap)
