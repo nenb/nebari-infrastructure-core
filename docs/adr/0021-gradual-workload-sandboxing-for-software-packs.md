@@ -44,7 +44,7 @@ Listed from least to most work for NIC.
 
 ## Decision Outcome
 
-Chosen option: "Option 4". This ADR fixes the contract below and delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox: enforcement is the consumer's. NIC reports an incompatible cluster but does not block `nic deploy`; the pack's startup check refuses sandboxed work instead. An operator option that makes a requirement fail the deploy may be added later without changing the mapping.
+Chosen option: "Option 4". This ADR sets out the contract below. For now it delivers only one thing: a tested description of where Landlock works on the cluster's normal runtime, which `nic outputs` reports for each cluster. NIC does not enforce the sandbox; the pack does, by confining its own commands and refusing sandboxed work when it can't. NIC also doesn't stop `nic deploy` on a cluster that can't support it; it only reports it. A setting to make the deploy fail in that case can be added later without changing the contract.
 
 The contract gives NIC a shared vocabulary for "what sandboxing this cluster supports", and ready-made settings for packs. Packs then ask for a kind of protection, not a specific tool, and the cluster's options can grow (for example adding gVisor or Kata) without packs having to change.
 
