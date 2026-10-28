@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021, whose `mediated-kernel` boundary level it implements with gVisor. Related sketches, none of which it depends on: [ADR-0022](0022-in-pod-namespaces-capability.md) (bubblewrap inside gVisor as the route for `in-pod-namespaces`), [ADR-0024](0024-immutable-node-pool-rollouts.md) (one candidate upgrade mechanism) and [ADR-0025](0025-untrusted-execution-pods.md) (guarantees around tool-execution sandbox pods). Revised 2026-10-28 after review: narrowed to tool-execution sandbox pods first; an implementation-named `RuntimeClass`; placement only on a label nodes cannot write; lifecycle invariants instead of a dependency on ADR-0024. Mechanisms, probe evidence and the verification checklist are in the design doc ([mechanisms](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-mechanisms-in-full), [evidence](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-probe-evidence-in-full)).
+Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021, whose `mediated-kernel` boundary level it implements with gVisor. It uses the requirement sets and requirement mapping that ADR-0022 proposes adding to ADR-0021's contract ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#proposed-additions-requirement-sets-and-a-requirement-mapping)), and would add them itself if ADR-0022 does not proceed. Related sketches, none of which it depends on: [ADR-0022](0022-in-pod-namespaces-capability.md) (bubblewrap inside gVisor as the route for `in-pod-namespaces`), [ADR-0024](0024-immutable-node-pool-rollouts.md) (one candidate upgrade mechanism) and [ADR-0025](0025-untrusted-execution-pods.md) (guarantees around tool-execution sandbox pods). Revised 2026-10-28 after review: narrowed to tool-execution sandbox pods first; an implementation-named `RuntimeClass`; placement only on a label nodes cannot write; lifecycle invariants instead of a dependency on ADR-0024. Mechanisms, probe evidence and the verification checklist are in the design doc ([mechanisms](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-mechanisms-in-full), [evidence](../design-doc/implementation/20-workload-sandboxing.md#adr-0023-probe-evidence-in-full)).
 
 ## Date
 
@@ -33,7 +33,7 @@ ADR-0021 lets an agent's commands restrict themselves with Landlock, on the host
 - **Install at boot, not from inside the cluster.** No privileged installer or upgrade pods.
 - **Confine change.** Installation and failures touch only opted-in node groups, and a failure of this optional runtime never takes down a node's other workloads.
 - **Never unsandboxed.** An unverified node or a broken runtime leaves pods Pending or failing, never running without gVisor.
-- **Fit ADR-0021's interface:** requirement sets, an implementation-named class labelled with its level, placement labels nodes cannot write, declaration, resolution and observation kept separate.
+- **Fit ADR-0021's contract:** an implementation-named class labelled with its level, and placement labels nodes cannot write; plus the proposed requirement sets, with declaration, resolution and observation kept separate.
 
 ## Considered Options
 
@@ -49,7 +49,7 @@ Chosen option: "Option 3", because it gives root-running sandboxes a stronger bo
 
 ### The implementation
 
-**gVisor** is an implementation of ADR-0021's **`mediated-kernel`** level (the `user-space-kernel` family): a pod using its `RuntimeClass` runs behind a user-space kernel that implements the Linux syscall interface, so it never makes system calls directly to the host kernel. Under ADR-0021's ordering rule it satisfies a requirement set only where it has every property the set needs:
+**gVisor** is an implementation of ADR-0021's **`mediated-kernel`** level (which this sketch calls the `user-space-kernel` family): a pod using its `RuntimeClass` runs behind a user-space kernel that implements the Linux syscall interface, so it never makes system calls directly to the host kernel. Under ADR-0021's ordering rule it satisfies a requirement set only where it has every property the set needs:
 
 | Property | gVisor |
 |---|---|
@@ -178,7 +178,7 @@ Found while probing for this ADR and reported to the NIC team (links to be added
 
 ## Links
 
-- [ADR-0021: Gradual Workload Sandboxing Capability for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
+- [ADR-0021: Workload Sandboxing Capability Contract for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
 - [ADR-0022: In-Pod Namespace Sandboxes](0022-in-pod-namespaces-capability.md)
 - [Design doc: Workload Sandboxing](../design-doc/implementation/20-workload-sandboxing.md)
 - [ADR-0010: High-Security Mode](0010-high-security-mode.md)

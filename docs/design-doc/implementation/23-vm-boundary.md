@@ -26,7 +26,7 @@ The launch template's CPU option, the instance family and the Kata, VMM and gues
 
 ## 23.3 AKS
 
-NIC's AKS module creates a node pool with Pod Sandboxing enabled (the node pool's workload runtime, on Azure Linux; field names to be verified) and NIC publishes Azure's runtime class name in the requirement mapping. Azure owns the runtime's installation and version: NIC declares it as a separate implementation, with its own properties established by a probe on AKS, and observes it with the deploy check, without implying control. ADR-0025's profile on AKS requires the Cilium dataplane (#691).
+NIC's AKS module creates a node pool with Pod Sandboxing enabled (the node pool's workload runtime, on Azure Linux; field names to be verified) and NIC publishes Azure's runtime class name in the requirement mapping the sketches propose (§20.6). Azure owns the runtime's installation and version: NIC declares it as a separate implementation, with its own properties established by a probe on AKS, and observes it with the deploy check, without implying control. ADR-0025's profile on AKS requires the Cilium dataplane (#691).
 
 ## 23.4 Memory, start time and storage
 

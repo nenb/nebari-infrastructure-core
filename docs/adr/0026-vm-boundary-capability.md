@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet, and paused until a consumer needs it and AKS has been probed. Depends only on ADR-0021, whose `hardware-virtualised` boundary level it implements with Kata (the `vm-boundary` family). It mirrors mechanisms sketched in [ADR-0023](0023-user-space-kernel-capability.md) and can be required by [ADR-0025](0025-untrusted-execution-pods.md)'s profile, but depends on neither; [ADR-0024](0024-immutable-node-pool-rollouts.md) is not assumed to apply unchanged. Mechanisms and the verification checklist are in the [design doc](../design-doc/implementation/23-vm-boundary.md).
+Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet, and paused until a consumer needs it and AKS has been probed. Depends only on ADR-0021, whose `hardware-virtualised` boundary level it implements with Kata (which this sketch calls the `vm-boundary` family). Where it mentions the requirement mapping, it relies on the requirement sets and mapping the sketches propose adding to ADR-0021's contract ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#proposed-additions-requirement-sets-and-a-requirement-mapping)). It mirrors mechanisms sketched in [ADR-0023](0023-user-space-kernel-capability.md) and can be required by [ADR-0025](0025-untrusted-execution-pods.md)'s profile, but depends on neither; [ADR-0024](0024-immutable-node-pool-rollouts.md) is not assumed to apply unchanged. Mechanisms and the verification checklist are in the [design doc](../design-doc/implementation/23-vm-boundary.md).
 
 ## Date
 
@@ -23,7 +23,7 @@ Because a VM pod is still a pod, it fits ADR-0021's interface and can reuse the 
 ## Decision Drivers
 
 - **A boundary with its own kernel** for workloads whose threat model needs one.
-- **Same interface as gVisor.** Packs read their settings from the requirement mapping, so a set that resolves to Kata needs no pack change.
+- **Same interface as gVisor.** Packs read their settings from the proposed requirement mapping, so a set that resolves to Kata needs no pack change.
 - **Use the provider's own mechanism where one exists** (AKS), and install at boot elsewhere (ADR-0023's driver).
 - **Elastic, not bare metal, where possible.**
 - **Promise only what is verified**, per instance family and node image.
@@ -42,7 +42,7 @@ Chosen option: "Option 2", because it delivers a guest-kernel boundary through t
 
 ### The implementation
 
-**`vm-boundary`** is an implementation family of ADR-0021's **`hardware-virtualised`** level: a pod that uses its `RuntimeClass` (`nebari-kata`, or Azure's class on AKS) runs inside its own virtual machine with its own guest kernel, isolated from the host by hardware virtualisation. Kata Containers is its first implementation. Under ADR-0021's ordering rule, a stronger level satisfies an operator's `mediated-kernel` policy, but satisfies a requirement set only where Kata has every property the set needs. ADR-0021 builds no choice between two qualifying implementations, so offering gVisor and Kata for the same set on one provider needs that choice decided first.
+**`vm-boundary`** is this sketch's name for implementations of ADR-0021's **`hardware-virtualised`** level: a pod that uses its `RuntimeClass` (`nebari-kata`, or Azure's class on AKS) runs inside its own virtual machine with its own guest kernel, isolated from the host by hardware virtualisation. Kata Containers is its first implementation. Under ADR-0021's ordering rule, a stronger level satisfies an operator's `mediated-kernel` policy, but satisfies a requirement set only where Kata has every property the set needs. ADR-0021 builds no choice between two qualifying implementations, so offering gVisor and Kata for the same set on one provider needs that choice decided first.
 
 **Two implementations, qualified separately.** Kata installed by NIC on AWS (QEMU) and AKS Pod Sandboxing (a different VMM and guest, managed by Azure) are separate implementations of the level. Properties established for one are not carried over to the other; the table below is for AWS only, and AKS has none until it is probed.
 
@@ -144,7 +144,7 @@ Validation uses the properties above: Kata on AWS has `process-self-restriction`
 
 ## Links
 
-- [ADR-0021: Gradual Workload Sandboxing Capability for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
+- [ADR-0021: Workload Sandboxing Capability Contract for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
 - [ADR-0023: User-Space Kernel Sandboxes with gVisor](0023-user-space-kernel-capability.md)
 - [ADR-0024: Immutable Node-Pool Rollouts](0024-immutable-node-pool-rollouts.md)
 - [ADR-0025: Guarantees for Untrusted-Execution Pods](0025-untrusted-execution-pods.md)

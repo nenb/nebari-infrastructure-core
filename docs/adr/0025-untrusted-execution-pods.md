@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021, of whose interface this profile is the third axis, independent of any runtime implementation; [ADR-0023](0023-user-space-kernel-capability.md) (gVisor) and [ADR-0026](0026-vm-boundary-capability.md) (Kata) sketch implementations of higher levels it can require. Requires NetworkPolicy enforcement on every provider that offers it ([#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691), with [#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) for the AWS VPC CNI). Revised 2026-10-28 after review: a trust model; ambient credential delivery prohibited with no Secret exception; more admission rules; egress only to operator-declared namespaces and DNS denied by default; the strict-mode prerequisite; exec and shared-storage risks; provider qualification as a delivery gate; the sandbox-platform profile and claimed levels dropped. Mechanisms, the verification checklist and a consumer guide are in the [design doc](../design-doc/implementation/22-untrusted-execution-pods.md).
+Proposed (DRAFT, exploratory): a feasibility sketch that fits [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md)'s interface; not proposed for acceptance yet. Depends only on ADR-0021, of whose interface this profile is the third axis, independent of any runtime implementation; [ADR-0023](0023-user-space-kernel-capability.md) (gVisor) and [ADR-0026](0026-vm-boundary-capability.md) (Kata) sketch implementations of higher levels it can require. It names its minimum level through the requirement sets the sketches propose adding to ADR-0021's contract ([§20.6](../design-doc/implementation/20-workload-sandboxing.md#proposed-additions-requirement-sets-and-a-requirement-mapping)); ADR-0021 itself adopts only `sandbox.minLandlockABI`. Requires NetworkPolicy enforcement on every provider that offers it ([#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691), with [#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) for the AWS VPC CNI). Revised 2026-10-28 after review: a trust model; ambient credential delivery prohibited with no Secret exception; more admission rules; egress only to operator-declared namespaces and DNS denied by default; the strict-mode prerequisite; exec and shared-storage risks; provider qualification as a delivery gate; the sandbox-platform profile and claimed levels dropped. Mechanisms, the verification checklist and a consumer guide are in the [design doc](../design-doc/implementation/22-untrusted-execution-pods.md).
 
 ## Date
 
@@ -48,7 +48,7 @@ Chosen option: "Option 3", because the properties packs cannot provide themselve
 sandbox:
   requirements:
     - name: tool-sandboxes
-      boundary: mediated-kernel        # resolved per provider (ADR-0021)
+      boundary: mediated-kernel        # a proposed requirement set (§20.6), resolved per provider
   untrusted_execution:
     namespaces: [agent-sandboxes]      # NIC creates, labels and guards these
     requirement: tool-sandboxes        # minimum level for every pod in them
@@ -130,7 +130,7 @@ Agent Substrate and similar systems run many sandboxes inside worker pods that d
 
 ## Links
 
-- [ADR-0021: Gradual Workload Sandboxing Capability for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
+- [ADR-0021: Workload Sandboxing Capability Contract for Software Packs](0021-gradual-workload-sandboxing-for-software-packs.md)
 - [ADR-0023: User-Space Kernel Sandboxes with gVisor](0023-user-space-kernel-capability.md)
 - [ADR-0026: VM Boundary with Kata Containers](0026-vm-boundary-capability.md)
 - [Design doc: Untrusted-Execution Pods](../design-doc/implementation/22-untrusted-execution-pods.md)

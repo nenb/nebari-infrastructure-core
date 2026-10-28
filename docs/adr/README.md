@@ -26,7 +26,7 @@ An ADR is a document that captures an important architectural decision made alon
 | [ADR-0016](0016-opentofu-runtime-version-policy.md) | OpenTofu Runtime Version Policy (External Binaries and Compatibility Window) | Proposed | 2026-08-12 |
 | [ADR-0017](0017-user-journey-tests-for-foundational-software.md) | User Journey (E2E) Tests for Foundational Software | Accepted | 2026-08-27 |
 | [ADR-0018](0018-local-gateway-host-ports.md) | Publish the Local Gateway on Host Ports Instead of MetalLB | Accepted | 2026-09-01 |
-| [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md) | Gradual Workload Sandboxing Capability for Software Packs | Proposed | 2026-10-12 |
+| [ADR-0021](0021-gradual-workload-sandboxing-for-software-packs.md) | Workload Sandboxing Capability Contract for Software Packs | Proposed | 2026-10-12 |
 | [ADR-0022](0022-in-pod-namespaces-capability.md) | In-Pod Namespace Sandboxes (`in-pod-namespaces`) for Software Packs | Proposed (exploratory) | 2026-10-15 |
 | [ADR-0023](0023-user-space-kernel-capability.md) | User-Space Kernel Sandboxes (`user-space-kernel`) with gVisor | Proposed (exploratory) | 2026-10-19 |
 | [ADR-0024](0024-immutable-node-pool-rollouts.md) | Immutable Node-Pool Rollouts | Proposed (exploratory) | 2026-10-27 |
