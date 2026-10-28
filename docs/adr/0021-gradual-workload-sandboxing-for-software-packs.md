@@ -34,13 +34,15 @@ Software packs increasingly run code nobody has reviewed line by line, such as c
 
 Listed from least to most work for NIC.
 
-1. Do less: document which node setups work, maintain an example launcher that refuses to run when it cannot confine, let operators give packs the exact runtime name to use (a `RuntimeClass`, such as `nebari-gvisor`) as a Helm value, treat NetworkPolicy as general infrastructure work, and leave sandbox lifecycle to Agent Sandbox.
-2. Label qualifying node groups from a NIC-maintained table of node images.
-3. Detect the capability per node with Node Feature Discovery.
-4. A tool-neutral contract with a published mapping of concrete values, starting with a qualified description of Landlock on the default runtime.
-5. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
-6. Go straight to a stronger-isolation runtime (gVisor or Kata) as the only option.
-7. Adopt a full sandbox platform (e.g. Agent Substrate).
+1. **Do less:** document which node setups work, maintain an example launcher, let operators give packs the exact runtime name (a `RuntimeClass`) as a Helm value, treat NetworkPolicy as general infrastructure work, and leave sandbox lifecycle to Agent Sandbox. *NIC does all of this anyway, but without a shared description every pack has to work out separately what each cluster supports.*
+2. **Label qualifying node groups** from a NIC-maintained table of node images. *A table to maintain for steering that helps little, and it doesn't confirm Landlock is switched on.*
+3. **Detect the capability per node** with Node Feature Discovery. *An extra component with the same limits as 2.*
+4. **A tool-neutral contract** with a published mapping of concrete values, starting with a tested description of Landlock on the normal runtime. *Chosen: usable now, cheap, nothing relaxed, not tied to one tool.*
+5. **Bake in one sandboxing tool** (e.g. bubblewrap). *No route to stronger isolation.*
+6. **Go straight to gVisor or Kata** as the only option. *Needs installing per provider, adds overhead and breaks some workloads; kept as the reserved levels.*
+7. **Adopt a full sandbox platform** (e.g. Agent Substrate). *Pre-1.0, runs its own runtimes from privileged pods, and would be a separate system to trust rather than a level NIC provides.*
+
+The full assessment of options 2, 3, 6 and 7 is in [§20](https://github.com/nenb/nebari-infrastructure-core/blob/bca13609252691012ad1dc495f90db47d38d7a69/docs/design-doc/implementation/20-workload-sandboxing.md#option-2-node-group-labels-from-an-image-table).
 
 ## Decision Outcome
 
@@ -147,15 +149,6 @@ It relaxes nothing and runs under Pod Security `restricted`. It shares the host 
 - NIC doesn't block a deploy or steer pods away from unsuitable nodes; packs rely on their startup check.
 - Maintainers must keep the qualification record up to date.
 - The mapping is versioned before it has a second entry, and wiring values into packs is manual until ADR-0003.
-
-## Options Detail
-
-- **Option 1 (do less):** NIC does all of this anyway (docs, example launcher, runtime names, Agent Sandbox). Without a shared description, though, every pack has to work out separately what each cluster supports.
-- **Options 2 and 3 (image-table labels, Node Feature Discovery):** extra components or tables to steer pods, which help little and still don't confirm Landlock is switched on.
-- **Option 4 (chosen):** usable now, cheap, nothing relaxed, not tied to one tool.
-- **Option 5 (one tool):** no route to stronger isolation.
-- **Option 6 (gVisor or Kata only):** needs installing per provider, adds overhead and breaks some workloads; kept as the reserved levels.
-- **Option 7 (full sandbox platform):** Agent Substrate is pre-1.0, runs its own runtimes from privileged pods, and would be a separate system to trust rather than a level NIC provides.
 
 ## Open Questions
 
