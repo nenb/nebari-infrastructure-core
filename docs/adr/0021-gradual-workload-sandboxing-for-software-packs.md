@@ -32,17 +32,19 @@ Software packs increasingly run code nobody has reviewed line by line, such as c
 
 ## Considered Options
 
-1. Do less: document supported node environments, maintain a fail-closed launcher, pass concrete `RuntimeClass` names as Helm values, treat NetworkPolicy as general infrastructure work and leave lifecycle to Agent Sandbox.
-2. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
-3. A tool-neutral contract with a published mapping of concrete values, starting with a qualified description of Landlock on the default runtime.
-4. Go straight to a stronger-isolation runtime (gVisor or Kata) as the only option.
-5. Adopt a full sandbox platform (e.g. Agent Substrate).
-6. Detect the capability per node with Node Feature Discovery.
-7. Label qualifying node groups from a NIC-maintained table of node images.
+Listed from least to most work for NIC.
+
+1. Do less: document which node setups work, maintain an example launcher that refuses to run when it cannot confine, let operators give packs the exact runtime name to use (a `RuntimeClass`, such as `nebari-gvisor`) as a Helm value, treat NetworkPolicy as general infrastructure work, and leave sandbox lifecycle to Agent Sandbox.
+2. Label qualifying node groups from a NIC-maintained table of node images.
+3. Detect the capability per node with Node Feature Discovery.
+4. A tool-neutral contract with a published mapping of concrete values, starting with a qualified description of Landlock on the default runtime.
+5. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
+6. Go straight to a stronger-isolation runtime (gVisor or Kata) as the only option.
+7. Adopt a full sandbox platform (e.g. Agent Substrate).
 
 ## Decision Outcome
 
-Chosen option: "Option 3". This ADR fixes the contract below and delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox: enforcement is the consumer's. NIC reports an incompatible cluster but does not block `nic deploy`; the pack's startup check refuses sandboxed work instead. An operator option that makes a requirement fail the deploy may be added later without changing the mapping.
+Chosen option: "Option 4". This ADR fixes the contract below and delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox: enforcement is the consumer's. NIC reports an incompatible cluster but does not block `nic deploy`; the pack's startup check refuses sandboxed work instead. An operator option that makes a requirement fail the deploy may be added later without changing the mapping.
 
 The contract gives NIC a shared vocabulary for "what sandboxing this cluster supports", and ready-made settings for packs. Packs then ask for a kind of protection, not a specific tool, and the cluster's options can grow (for example adding gVisor or Kata) without packs having to change.
 
@@ -158,13 +160,13 @@ Test-only installs on clusters deployed with NIC (2026-10-19 to 2026-10-27) info
 ## Options Detail
 
 - **Option 1 (do less):** good practice that NIC follows (documentation, the reference launcher, concrete class names, Agent Sandbox for lifecycle), but packs cannot choose node images, install runtimes or rely on CNI enforcement, so each would rediscover what each cluster offers. The thin contract adds the shared, qualified description.
-- **Option 2 (one tool):** no path to stronger isolation.
-- **Option 3 (chosen):** usable now with no relaxation, cheap and tool-independent; its shape is set before a second entry exists.
-- **Option 4 (a stronger runtime only):** needs provider-specific installation and adds overhead and compatibility gaps; kept as the reserved levels.
-- **Option 5 (a full sandbox platform):** Agent Substrate (v0.6.0, pre-1.0) runs its own runtimes from root worker pods; it is not qualified or supported by NIC, and would be separately trusted infrastructure, not an implementation of a level.
-- **Options 6 and 7 (Node Feature Discovery, labels from an image table):** components or tables for steering that buys little, without confirming Landlock is active.
+- **Options 2 and 3 (labels from an image table, Node Feature Discovery):** components or tables for steering that buys little, without confirming Landlock is active.
+- **Option 4 (chosen):** usable now with no relaxation, cheap and tool-independent; its shape is set before a second entry exists.
+- **Option 5 (one tool):** no path to stronger isolation.
+- **Option 6 (a stronger runtime only):** needs provider-specific installation and adds overhead and compatibility gaps; kept as the reserved levels.
+- **Option 7 (a full sandbox platform):** Agent Substrate (v0.6.0, pre-1.0) runs its own runtimes from root worker pods; it is not qualified or supported by NIC, and would be separately trusted infrastructure, not an implementation of a level.
 
-The full assessment of Options 4, 5 and 7 is in the design doc ([§20](../design-doc/implementation/20-workload-sandboxing.md#option-4-stronger-isolation-runtime-only-gvisor-or-kata)).
+The full assessment of Options 2, 3, 6 and 7 is in the design doc ([§20](../design-doc/implementation/20-workload-sandboxing.md#option-2-node-group-labels-from-an-image-table)).
 
 ## Open Questions
 

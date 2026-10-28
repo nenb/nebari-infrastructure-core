@@ -186,7 +186,7 @@ sandbox:
 
 **The `default` entry.** It describes the cluster's normal runtime with no `runtimeClassName`. Its `state` is derived from the expectations of the node groups that can run pods (every group whose configured maximum size is above zero): `qualified` if all of them are qualified, `unsupported` if all of them are unsupported, and `unknown` otherwise, including a mix of qualified and unsupported groups. `capabilities` lists `process-self-restriction` only when the state is `qualified`; under `unknown` or `unsupported` it is empty, and the per-group report says which groups are the reason. An operator may still pass the values to a pack under `unknown`: the pack's startup check decides on each node, and NIC blocks nothing. The security settings meet Pod Security `restricted`, each at the level it belongs: `runAsNonRoot` and `seccompProfile` at pod level, so they also cover init containers, and `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]` per container, where Kubernetes defines them. The pack still sets `runAsUser` where its image has no numeric non-root user.
 
-**Placement is reserved.** The `default` entry has no placement, and NIC labels no node groups for it. In a mixed cluster the pack's startup check refuses work on a node that does not qualify; steering pods away from such groups is future work (see Option 7 and the placement-label guidance below).
+**Placement is reserved.** The `default` entry has no placement, and NIC labels no node groups for it. In a mixed cluster the pack's startup check refuses work on a node that does not qualify; steering pods away from such groups is future work (see Option 2 and the placement-label guidance below).
 
 **Extension space, not a frozen schema.** Only fields a consumer uses today are defined. These names are reserved for later entries, with their intended meaning: `runtimeClassName` (an exact class); `placement` (node selector, affinity and tolerations NIC renders, so packs never hardcode provider or node-group labels); `workspaceStorageClass` (a class known to work with that entry's runtime, with access-mode and ownership notes: the tested gVisor configuration could not write to EFS access points as NIC configures them, so storage is part of an entry, not a promise that any storage works); `profile` (settings such as a namespace); and `implementation` (release and property-set version). Consumers ignore fields they do not know. Adding a field or an entry keeps `version`; removing or redefining one, or changing what a value means, bumps it.
 
@@ -585,35 +585,9 @@ A later `in-pod-namespaces` capability on the host kernel would add real risk, s
 
 ## 20.12 Alternatives considered in detail
 
-ADR-0021 summarises Options 4, 5 and 7; their full assessment is recorded here.
+ADR-0021 summarises Options 2, 3, 6 and 7; their full assessment is recorded here.
 
-### Option 4: Stronger-isolation runtime only (gVisor or Kata)
-
-Provide only a `RuntimeClass` backed by gVisor or Kata, e.g. through `kubernetes-sigs/agent-sandbox`.
-
-- **Pros:** much stronger boundary; a kernel exploit in the workload does not directly yield the node.
-- **Cons:** provider-specific runtime installation (nested virtualisation or bare metal for Kata), memory and I/O overhead, compatibility gaps.
-
-Kept as implementations of the `mediated-kernel` and `hardware-virtualised` levels (§20.6).
-
-### Option 5: Adopt a full sandbox platform (e.g. Agent Substrate)
-
-Install a complete agent-sandbox platform as NIC's sandboxing answer and have packs run untrusted work on it. Agent Substrate is the leading example (v0.6.0, released 2026-10-22; pre-1.0 with no compatibility guarantees; documented for GKE and kind only): a control plane that runs up to 1,000 "actors" in each worker pod, isolates each under gVisor or a Kata guest on Cloud Hypervisor that the worker downloads, verifies and starts itself rather than through a `RuntimeClass`, suspends and resumes them from snapshots in object storage, and brokers egress with credential injection through a shared gateway.
-
-- **Pros:** a much stronger boundary than rows 2 and 3, appropriate for attacker-influenced or multi-tenant code; egress policy, credential injection, suspend/resume and density come built in rather than being assembled by each pack; an ecosystem is forming around it.
-- **Cons:**
-  - A different isolation unit: many actors share a worker pod, so NIC's pod-level guarantees (network policy, admission) cannot separate actors; that is the platform's job, and its isolation between actors on one node is still a roadmap item. (The earlier objection that it replaces the pod model no longer separates it from NIC's own direction, which also runs untrusted work in separate sandbox pods.)
-  - Not qualified or supported by NIC: Agent Substrate needs Kubernetes 1.36 or later with beta pod-certificate APIs (`PodCertificateRequest`, `ClusterTrustBundle`) that managed services do not let you enable (realistically 1.37), enforced NetworkPolicy ([#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) is blocked), changes to GKE-specific node paths, and KVM-capable nodes for its microVM class (not Hetzner Cloud; its gVisor class needs none).
-  - A weaker pod-level posture: its worker pods are no longer `privileged`, but run as root with 13 added capabilities (including `SYS_ADMIN`, `NET_ADMIN`, `SYS_PTRACE`), seccomp and AppArmor unconfined, and `/dev/kvm` and `/dev/net/tun` for microVMs; its node agent mounts host paths. ADR-0010's hardened mode would have to admit that by exception, whereas `process-self-restriction` runs under Pod Security `restricted`.
-  - A large operational footprint: API server, controller, router, egress gateway, node agent, an identity (OIDC) server, a pod-certificate signer, embedded OpenFGA, PostgreSQL and object storage.
-
-Not chosen as the starting point. Because actors are not pods with published settings and the platform runs its own runtime binaries, it cannot provide a level through NIC's mapping; where it can run, it is separately trusted infrastructure on dedicated node groups, close to host root, not an implementation of a level. If packs converge on such a platform, the future `in-pod-namespaces` work can be deprioritised; `process-self-restriction` remains useful either way.
-
-### Option 6: Node Feature Discovery
-
-Node Feature Discovery, a Kubernetes SIG project, runs a DaemonSet that reads each node's kernel version and configuration, and a controller that turns those facts into node labels through `NodeFeatureRule` resources. It would label nodes automatically, including images NIC does not know, `existing` clusters and kind. It was discarded because it adds a DaemonSet, a controller with permission to patch nodes, and CRDs for something NIC can do with a version comparison: the node images NIC provisions are known in advance and change rarely. Like the kernel check, it reads kernel configuration rather than confirming Landlock is active at boot. It remains an option if clusters NIC does not provision become important.
-
-### Option 7: Node-group labels from an image table
+### Option 2: Node-group labels from an image table
 
 An earlier draft of ADR-0021 advertised `process-self-restriction` with node-group labels rather than only reporting an expectation per node group:
 
@@ -625,6 +599,32 @@ An earlier draft of ADR-0021 advertised `process-self-restriction` with node-gro
 - **Cons:** steering matters only in mixed clusters, and packs check Landlock at startup anyway; a table to keep current, label plumbing in every provider and a readiness record for that benefit. The `default` mapping entry renders a placement from NIC-set node-group labels where a provider has them (§20.6), which covers the mixed-cluster case without a separate table.
 
 It can be added later, without changing the capability's name or guarantee, if mixed clusters become common.
+
+### Option 3: Node Feature Discovery
+
+Node Feature Discovery, a Kubernetes SIG project, runs a DaemonSet that reads each node's kernel version and configuration, and a controller that turns those facts into node labels through `NodeFeatureRule` resources. It would label nodes automatically, including images NIC does not know, `existing` clusters and kind. It was discarded because it adds a DaemonSet, a controller with permission to patch nodes, and CRDs for something NIC can do with a version comparison: the node images NIC provisions are known in advance and change rarely. Like the kernel check, it reads kernel configuration rather than confirming Landlock is active at boot. It remains an option if clusters NIC does not provision become important.
+
+### Option 6: Stronger-isolation runtime only (gVisor or Kata)
+
+Provide only a `RuntimeClass` backed by gVisor or Kata, e.g. through `kubernetes-sigs/agent-sandbox`.
+
+- **Pros:** much stronger boundary; a kernel exploit in the workload does not directly yield the node.
+- **Cons:** provider-specific runtime installation (nested virtualisation or bare metal for Kata), memory and I/O overhead, compatibility gaps.
+
+Kept as implementations of the `mediated-kernel` and `hardware-virtualised` levels (§20.6).
+
+### Option 7: Adopt a full sandbox platform (e.g. Agent Substrate)
+
+Install a complete agent-sandbox platform as NIC's sandboxing answer and have packs run untrusted work on it. Agent Substrate is the leading example (v0.6.0, released 2026-10-22; pre-1.0 with no compatibility guarantees; documented for GKE and kind only): a control plane that runs up to 1,000 "actors" in each worker pod, isolates each under gVisor or a Kata guest on Cloud Hypervisor that the worker downloads, verifies and starts itself rather than through a `RuntimeClass`, suspends and resumes them from snapshots in object storage, and brokers egress with credential injection through a shared gateway.
+
+- **Pros:** a much stronger boundary than rows 2 and 3, appropriate for attacker-influenced or multi-tenant code; egress policy, credential injection, suspend/resume and density come built in rather than being assembled by each pack; an ecosystem is forming around it.
+- **Cons:**
+  - A different isolation unit: many actors share a worker pod, so NIC's pod-level guarantees (network policy, admission) cannot separate actors; that is the platform's job, and its isolation between actors on one node is still a roadmap item. (The earlier objection that it replaces the pod model no longer separates it from NIC's own direction, which also runs untrusted work in separate sandbox pods.)
+  - Not qualified or supported by NIC: Agent Substrate needs Kubernetes 1.36 or later with beta pod-certificate APIs (`PodCertificateRequest`, `ClusterTrustBundle`) that managed services do not let you enable (realistically 1.37), enforced NetworkPolicy ([#675](https://github.com/nebari-dev/nebari-infrastructure-core/issues/675) is blocked), changes to GKE-specific node paths, and KVM-capable nodes for its microVM class (not Hetzner Cloud; its gVisor class needs none).
+  - A weaker pod-level posture: its worker pods are no longer `privileged`, but run as root with 13 added capabilities (including `SYS_ADMIN`, `NET_ADMIN`, `SYS_PTRACE`), seccomp and AppArmor unconfined, and `/dev/kvm` and `/dev/net/tun` for microVMs; its node agent mounts host paths. ADR-0010's hardened mode would have to admit that by exception, whereas `process-self-restriction` runs under Pod Security `restricted`.
+  - A large operational footprint: API server, controller, router, egress gateway, node agent, an identity (OIDC) server, a pod-certificate signer, embedded OpenFGA, PostgreSQL and object storage.
+
+Not chosen as the starting point. Because actors are not pods with published settings and the platform runs its own runtime binaries, it cannot provide a level through NIC's mapping; where it can run, it is separately trusted infrastructure on dedicated node groups, close to host root, not an implementation of a level. If packs converge on such a platform, the future `in-pod-namespaces` work can be deprioritised; `process-self-restriction` remains useful either way.
 
 ## 20.13 Links
 
