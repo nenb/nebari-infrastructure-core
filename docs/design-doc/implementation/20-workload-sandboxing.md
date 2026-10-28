@@ -619,7 +619,7 @@ Scale limits are part of a capability's definition: where a provider's system ru
 **Packs already building isolation (rows 4 and 2-3 consumers).**
 
 - [collab-hub-pack#167](https://github.com/nebari-dev/collab-hub-pack/issues/167) Plan hosted coding workspaces for Nebari and Collab Hub (planning). The closest match to the coding-agent use case that motivates this ADR.
-- [collab-hub-pack#6](https://github.com/nebari-dev/collab-hub-pack/issues/6) Cog workers as separate pods with no ServiceAccount token, created only by a least-privilege controller (row 4). A separate-worker implementation exists; its egress and controller work remain unfinished, so it is a precedent rather than a finished reference.
+- [collab-hub-pack#6](https://github.com/nebari-dev/collab-hub-pack/issues/6) Workers as separate pods with no ServiceAccount token, created only by a least-privilege controller (row 4). A separate-worker implementation exists; its egress and controller work remain unfinished, so it is a precedent rather than a finished reference.
 - [collab-hub-pack#11](https://github.com/nebari-dev/collab-hub-pack/issues/11) Restrict worker egress to hub-mediated paths. Notes that a NetworkPolicy cannot allow a hostname, so model traffic goes through an in-cluster egress gateway; the same constraint applies to Landlock (row 2), which restricts by port, not host.
 - [nebi#445](https://github.com/nebari-dev/nebi/issues/445) and [nebi#513](https://github.com/nebari-dev/nebi/issues/513) Untrusted environment builds run in a shared worker with database credentials; proposal to run each job in its own pod (row 4). Proposed, not yet implemented.
 - [nebari-operator#197](https://github.com/nebari-dev/nebari-operator/issues/197) A shared NetworkPolicy helper for packs.
