@@ -22,13 +22,13 @@ Software packs increasingly run code nobody has reviewed line by line, such as c
 
 ## Decision Drivers
 
-- **Build in steps** behind an interface later options can join without breaking packs.
-- **Packs consume plain values:** nothing a pack does may depend on looking up the cluster.
-- **Tool-neutral, not tool-unqualified:** each guarantee is qualified against a concrete consumer.
-- **Provider-neutral:** capability flows through `InfraSettings`, with no provider-name switches outside `pkg/providers/cluster/`.
-- **Prefer Pod Security `restricted`.**
-- **Least machinery:** report what NIC knows; add configuration only for a real consumer.
-- **Compatible with the `security_level` ladder** in [ADR-0010](0010-high-security-mode.md).
+- **Grow in steps.** Start with what works today; add stronger options later without breaking packs that already use the contract.
+- **Packs get plain values.** A pack never queries the cluster; everything it needs arrives as Helm values.
+- **Name the protection, not the tool, but test it with a real tool.** Packs ask for a kind of protection. Every promise is backed by a test with a concrete consumer.
+- **Provider-neutral.** It works the same way on every cluster provider: capability flows through `InfraSettings`, with no provider-name switches outside `pkg/providers/cluster/`.
+- **Don't weaken pod security.** Prefer settings that pass Pod Security `restricted`.
+- **Keep NIC's part small.** Report what NIC knows; add configuration or components only when a real pack needs them.
+- **Fit high-security mode** ([ADR-0010](0010-high-security-mode.md)). Nothing here needs a privileged pod, so it works under `hardened`'s admission rules. A later option to fail the deploy on an unmet requirement would match `hardened`'s fail-closed deploys.
 
 ## Considered Options
 
