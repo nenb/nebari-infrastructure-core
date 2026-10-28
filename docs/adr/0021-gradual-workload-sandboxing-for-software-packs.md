@@ -95,27 +95,31 @@ sandbox:
   minLandlockABI: 4   # optional; validate/deploy fail if any node group falls below
 ```
 
-Named requirement sets for different kinds of workload can be added later if a real need appears.
-
 **Checks.**
 
 - **`nic validate`** compares each node group's declared floor with `minLandlockABI`, offline. A known floor below it is an error naming the group; an unknown floor is reported and left to `nic deploy`.
 - **`nic deploy`** reads each node's kernel version (`node.status.nodeInfo.kernelVersion`), maps it to the Landlock ABI that version introduced upstream, and fails if any node is below `minLandlockABI`. When nothing is required, a node below ABI 3 is a warning. The result per node group is shown by `nic outputs`.
 
-This is a **diagnostic inference**, not enforcement: a kernel version shows the Landlock code exists, not that it is enabled at boot, and nodes added later are not checked. Packs therefore still check Landlock at startup and refuse sandboxed work without it. NIC installs nothing in the cluster for this and sets no labels. Until pack codegen ([ADR-0003](0003-software-pack-codegen.md)) exists, operators pass the requirement to packs through their documented values.
+This is a **diagnostic inference**, not enforcement: a kernel version shows the Landlock code exists, not that it is enabled at boot, and nodes added later are not checked, so packs still check Landlock themselves (below). NIC installs nothing in the cluster for this and sets no labels. Until pack codegen ([ADR-0003](0003-software-pack-codegen.md)) exists, operators pass the requirement to packs through their documented values.
 
 **Probe and evidence.** Before NIC promises a floor for a node image family, a maintainer runs the probe on a fresh node of that family: Landlock active at boot and enforcing filesystem (and, at ABI 4, TCP) rules, with positive controls, and nested seccomp user notification working under the default seccomp profile. The probe is rerun when a provider changes kernel line, as part of release testing, never on users' clusters. It has passed on EKS 1.34 AL2023 (2026-10-19) and Hetzner Ubuntu 24.04 (2026-10-25) nodes; AKS has not been probed ([§20.8](../design-doc/implementation/20-workload-sandboxing.md#208-delivery-process-self-restriction)).
+
+### What a pack author does
+
+**Today, inside the pod.** A pack confines the commands it runs itself, with no change to its pod spec. At startup it reads the Landlock ABI and refuses sandboxed work if Landlock is missing or below what it needs. For each command it applies a Landlock ruleset in the process that will run it: writes only beneath a working directory and, at ABI 4, TCP `connect` only to listed ports and no `bind`. A pack that mediates system calls adds a nested seccomp user-notification filter. NIC publishes a recipe: the qualified consumer above as a short example, marking what the probe has and has not tested ([§20.8](../design-doc/implementation/20-workload-sandboxing.md#recipe-confining-a-command)). It shows a working configuration and bundles no tool; any Landlock library that applies the same ruleset will do.
+
+**Next, a separate sandbox pod with one setting.** The intended direction, outside this ADR's delivery, is that a pack puts the pod that runs untrusted code in a sandbox namespace and states the boundary level it needs. NIC would supply the runtime, default-deny networking, no ambient credentials and dedicated nodes, so the pack writes no isolation code. That serves agents that send tool calls to a separate pod, agents that run wholly inside a sandbox, and request layers such as Agent Sandbox. The contract fixed here is what makes that one setting mean the same on every provider.
 
 ### Out of scope
 
 - Installing gVisor, Kata or any other higher-level runtime. The level names are reserved; delivering one needs its own ADR under the rules above.
 - Profiles. NetworkPolicy enforcement, which a "no network" profile would need, is tracked in [#691](https://github.com/nebari-dev/nebari-infrastructure-core/issues/691).
-- Creating sandbox pods. That belongs to the pack or to a request layer; the [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) project's `Sandbox` and `SandboxClaim` resources are the expected request layer, consuming what NIC publishes.
+- Creating sandbox pods. That belongs to the pack or to a request layer such as [Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/), consuming what NIC publishes.
 - Choosing between two implementations of one level, which no provider offers today.
 
 ### Evidence from the higher levels
 
-The contract was checked against the higher levels before being fixed, using test-only installs on clusters deployed with NIC. Results and dates are in [§20.6](../design-doc/implementation/20-workload-sandboxing.md#evidence-from-the-higher-levels).
+The contract was checked against test-only installs on clusters deployed with NIC; results and dates are in [§20.6](../design-doc/implementation/20-workload-sandboxing.md#evidence-from-the-higher-levels).
 
 - **gVisor** on EKS 1.34 AL2023 (x86 and arm64) and Hetzner k3s (2026-10-19 to 2026-10-27) worked behind a `RuntimeClass` as a `mediated-kernel` implementation, but Landlock returned `ENOSYS` and the pod's `seccompProfile` was ignored. That gave the ordering rule and rule (e). Home directories on EFS access points, as NIC configures them, were not writable under gVisor, so qualification covers storage (rule (b)).
 - **Kata** (QEMU) on EKS 1.34 through EC2 nested virtualisation (2026-10-27) passed this ADR's probe inside the guest at Landlock ABI 7, while the declared `RuntimeDefault` was not applied. In-pod capabilities differ between implementations, which is why NIC publishes them separately from levels.
@@ -132,8 +136,7 @@ The contract was checked against the higher levels before being fixed, using tes
 **Good:**
 
 - A useful primitive with no relaxation of pod security, no components and no admission exceptions.
-- Packs get a provider-neutral primitive, choose their own tool and need no node selectors.
-- Little NIC code: a per-node-group field, one setting and two checks.
+- Packs get a provider-neutral primitive, choose their own tool and need no node selectors; NIC adds a per-node-group field, one setting and two checks.
 - Stronger isolation can arrive as implementations of the reserved levels without breaking packs that use the contract.
 
 **Bad:**
@@ -147,8 +150,8 @@ The contract was checked against the higher levels before being fixed, using tes
 
 ## Options Detail
 
-- **Option 1 (do nothing):** pushes packs towards privileged pods or `Unconfined` profiles, which fail Pod Security Baseline and conflict with ADR-0010.
-- **Option 2 (one tool):** concrete and easy to test, but couples the interface to a tool with no path to stronger isolation. Option 3 keeps its concreteness by qualifying each capability against a tested consumer.
+- **Option 1 (do nothing):** pushes packs towards privileged pods or `Unconfined` profiles, which conflict with ADR-0010.
+- **Option 2 (one tool):** concrete and easy to test, but couples the interface to a tool with no path to stronger isolation. Option 3 keeps that concreteness through tested consumers.
 - **Option 3 (chosen):** usable now with no relaxation, cheap and tool-independent; its shape is set before a second level exists.
 - **Option 4 (a stronger runtime only):** a much stronger boundary, but needs provider-specific installation and adds overhead and compatibility gaps. Kept as the reserved levels.
 - **Option 5 (a full sandbox platform):** Agent Substrate (v0.6.0, pre-1.0, GKE and kind only) runs its own runtimes from root worker pods and needs APIs NIC's providers lack. Where it can run, it is separately trusted infrastructure, not an implementation of a level.
