@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. The supporting design doc ([§20 Workload Sandboxing](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/docs/design-doc/implementation/20-workload-sandboxing.md)) and the [sandbox probe](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/tests/sandbox-probe/README.md) are linked at a fixed commit on the author's fork. They are proposed for this repository together with the implementation, not with this ADR.
+Proposed.
 
 ## Date
 
@@ -149,6 +149,8 @@ The full assessment of Options 4, 5 and 7 is in the design doc ([§20](https://g
 - Is it worth automating the probe as short-lived pods that `nic outputs` runs on each node group, at the cost of maintaining a multi-architecture image?
 
 ## Links
+
+The supporting design doc and the sandbox probe below are linked at a fixed commit on the author's fork; they are proposed for this repository together with the implementation, not with this ADR.
 
 - [Design doc: Workload Sandboxing (fork, fixed commit)](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/docs/design-doc/implementation/20-workload-sandboxing.md)
 - [Sandbox probe and reference launcher (fork, fixed commit)](https://github.com/nenb/nebari-infrastructure-core/blob/12f0abe497f8f7c94aa5dd891e9cf88d465cf87a/tests/sandbox-probe/README.md)
