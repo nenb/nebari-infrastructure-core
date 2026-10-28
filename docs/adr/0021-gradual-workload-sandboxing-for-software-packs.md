@@ -8,9 +8,9 @@ Proposed.
 
 2026-10-12
 
-**In short.** Software packs increasingly run code nobody has reviewed line by line, such as commands from a coding agent. Pack authors want to limit what that code can do: which files it can touch, whether it can reach the network, and whether it can read the pod's credentials. Whether that's possible depends on the cluster, for example the node's kernel or which container runtimes are installed. A pack can't find that out for itself. This ADR gives NIC a shared vocabulary for "what sandboxing this cluster supports", and a list of ready-made settings packs can copy. Packs then ask for a kind of protection, not a specific tool, and the cluster's options can grow (for example adding gVisor or Kata) without packs having to change. For now it only covers what already works on standard nodes, a Linux feature called Landlock, and only where it has been tested.
-
 ## The contract
+
+**In short.** Software packs increasingly run code nobody has reviewed line by line, such as commands from a coding agent. Pack authors want to limit what that code can do: which files it can touch, whether it can reach the network, and whether it can read the pod's credentials. Whether that's possible depends on the cluster, for example the node's kernel or which container runtimes are installed. A pack can't find that out for itself. This ADR gives NIC a shared vocabulary for "what sandboxing this cluster supports", and a list of ready-made settings packs can copy. Packs then ask for a kind of protection, not a specific tool, and the cluster's options can grow (for example adding gVisor or Kata) without packs having to change. For now it only covers what already works on standard nodes, a Linux feature called Landlock, and only where it has been tested.
 
 The contract describes a cluster's sandboxing support in three independent parts:
 
