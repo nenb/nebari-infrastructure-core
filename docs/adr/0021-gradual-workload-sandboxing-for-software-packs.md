@@ -8,13 +8,41 @@ Proposed. Supporting design is in the design doc [Workload Sandboxing](../design
 
 2026-10-12
 
-## The contract
+## Context
 
-### In short
+Software packs increasingly run code nobody has reviewed line by line, such as commands from a coding agent, notebook extensions that execute tool calls, or build steps. Pack authors want to limit what that code can do: which files it can touch, whether it can reach the network, and whether it can read the pod's credentials.
 
-Software packs increasingly run code nobody has reviewed line by line, such as commands from a coding agent. Pack authors want to limit what that code can do: which files it can touch, whether it can reach the network, and whether it can read the pod's credentials. Whether that's possible depends on the cluster, for example the node's kernel or which container runtimes are installed. A pack can't find that out for itself. This ADR gives NIC a shared vocabulary for "what sandboxing this cluster supports", and a list of ready-made settings packs can copy. Packs then ask for a kind of protection, not a specific tool, and the cluster's options can grow (for example adding gVisor or Kata) without packs having to change. For now it only covers what already works on standard nodes, a Linux feature called Landlock, and only where it has been tested.
+**Threat model.** The problem is containing an agent's own commands: code it runs because of a prompt injection, a compromised dependency or a mistake, which can reach whatever credentials, files and network the pod can. Many agent-sandbox failures are this kind of policy leakage rather than escape. Containing an adversary determined to escape the host is a different problem: shared-kernel mechanisms do not stop kernel exploits, and even VMs may not reliably contain cyber-capable agents ([Trail of Bits, 2026-08-26](https://blog.trailofbits.com/2026/08/26/vms-wont-contain-cyber-capable-agents/)). Sandboxing a whole agent protects its surroundings from the agent; it does not protect credentials deliberately given to that agent from prompt-injected decisions.
 
-### Details
+**Why NIC is involved.** Whether a pack can do this depends on the cluster, for example the node's kernel or which container runtimes are installed, and a pack can't find that out for itself. Confining processes inside the pod with Landlock, a Linux kernel feature, needs no change to pod security, but needs node kernels with it enabled at a sufficient ABI, which packs cannot choose. Stronger isolation needs runtimes (such as gVisor or Kata) and node preparation only the cluster can provide, and network guarantees need enforcement in the cluster's network plugin.
+
+## Decision Drivers
+
+- **Build in steps** behind an interface later options can join without breaking packs.
+- **Packs consume plain values:** nothing a pack does may depend on looking up the cluster.
+- **Tool-neutral, not tool-unqualified:** each guarantee is qualified against a concrete consumer.
+- **Provider-neutral:** capability flows through `InfraSettings`, with no provider-name switches outside `pkg/providers/cluster/`.
+- **Prefer Pod Security `restricted`.**
+- **Least machinery:** report what NIC knows; add configuration only for a real consumer.
+- **Compatible with the `security_level` ladder** in [ADR-0010](0010-high-security-mode.md).
+
+## Considered Options
+
+1. Do less: document supported node environments, maintain a fail-closed launcher, pass concrete `RuntimeClass` names as Helm values, treat NetworkPolicy as general infrastructure work and leave lifecycle to Agent Sandbox.
+2. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
+3. A tool-neutral contract with a published mapping of concrete values, starting with a qualified description of Landlock on the default runtime.
+4. Go straight to a stronger-isolation runtime (gVisor or Kata) as the only option.
+5. Adopt a full sandbox platform (e.g. Agent Substrate).
+6. Detect the capability per node with Node Feature Discovery.
+7. Label qualifying node groups from a NIC-maintained table of node images.
+
+## Decision Outcome
+
+Chosen option: "Option 3". This ADR fixes the contract below and delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox: enforcement is the consumer's. NIC reports an incompatible cluster but does not block `nic deploy`; the pack's startup check refuses sandboxed work instead. An operator option that makes a requirement fail the deploy may be added later without changing the mapping.
+
+The contract gives NIC a shared vocabulary for "what sandboxing this cluster supports", and ready-made settings for packs. Packs then ask for a kind of protection, not a specific tool, and the cluster's options can grow (for example adding gVisor or Kata) without packs having to change.
+
+### The contract
 
 The contract describes a cluster's sandboxing support in three independent parts:
 
@@ -69,41 +97,9 @@ A later entry might name a `RuntimeClass` that NIC installs (named after the imp
 
 Later ADRs that add runtimes should also follow the guidance in [§20.6](../design-doc/implementation/20-workload-sandboxing.md#guidance-for-later-capabilities) on placement labels, versioning and admission.
 
-## Context
-
-Software packs increasingly run code the user did not write line by line: coding agents, notebook extensions that execute tool calls, build steps. Pack developers want to contain it, for example by confining an agent's shell commands to a project directory, away from the pod's credentials and network.
-
-**Threat model.** The problem is containing an agent's own commands: code it runs because of a prompt injection, a compromised dependency or a mistake, which can reach whatever credentials, files and network the pod can. Many agent-sandbox failures are this kind of policy leakage rather than escape. Containing an adversary determined to escape the host is a different problem: shared-kernel mechanisms do not stop kernel exploits, and even VMs may not reliably contain cyber-capable agents ([Trail of Bits, 2026-08-26](https://blog.trailofbits.com/2026/08/26/vms-wont-contain-cyber-capable-agents/)). Sandboxing a whole agent protects its surroundings from the agent; it does not protect credentials deliberately given to that agent from prompt-injected decisions.
+### Delivered now
 
 **What Landlock gives.** A process can restrict itself and its descendants: which files they may read, write, create or remove; at ABI 4, which TCP ports they may connect to or bind (by port, not address, and not UDP); at ABI 6, signals and abstract Unix sockets outside the sandbox. It does not cover metadata changes such as `chmod`, descriptors already open, or credentials in the environment. Keeping the service-account token out needs a pod setting (`automountServiceAccountToken: false`); no network needs a seccomp filter in the process or, from outside the pod, a later profile.
-
-**Why NIC is involved.** Landlock needs no change to pod security, but needs node kernels with it enabled at a sufficient ABI, which packs cannot choose. Higher levels need runtimes and node preparation only the cluster can provide, and network guarantees need enforcement in the cluster's network plugin.
-
-## Decision Drivers
-
-- **Build in steps** behind an interface later options can join without breaking packs.
-- **Packs consume plain values:** nothing a pack does may depend on looking up the cluster.
-- **Tool-neutral, not tool-unqualified:** each guarantee is qualified against a concrete consumer.
-- **Provider-neutral:** capability flows through `InfraSettings`, with no provider-name switches outside `pkg/providers/cluster/`.
-- **Prefer Pod Security `restricted`.**
-- **Least machinery:** report what NIC knows; add configuration only for a real consumer.
-- **Compatible with the `security_level` ladder** in [ADR-0010](0010-high-security-mode.md).
-
-## Considered Options
-
-1. Do less: document supported node environments, maintain a fail-closed launcher, pass concrete `RuntimeClass` names as Helm values, treat NetworkPolicy as general infrastructure work and leave lifecycle to Agent Sandbox.
-2. Bake support for one sandboxing tool (e.g. bubblewrap) into NIC.
-3. A tool-neutral contract with a published mapping of concrete values, starting with a qualified description of Landlock on the default runtime.
-4. Go straight to a stronger-isolation runtime (gVisor or Kata) as the only option.
-5. Adopt a full sandbox platform (e.g. Agent Substrate).
-6. Detect the capability per node with Node Feature Discovery.
-7. Label qualifying node groups from a NIC-maintained table of node images.
-
-## Decision Outcome
-
-Chosen option: "Option 3". This ADR fixes the contract above and delivers a **qualified description of the default runtime's host prerequisite (Landlock), plus an optional, read-only diagnostic preflight**. It is not an enforced sandbox: enforcement is the consumer's. NIC reports an incompatible cluster but does not block `nic deploy`; the pack's startup check refuses sandboxed work instead. An operator option that makes a requirement fail the deploy may be added later without changing the mapping.
-
-### Delivered now
 
 **`process-self-restriction`.** A non-root process with no added capabilities, under the runtime's default seccomp profile, can restrict its own and its descendants' filesystem access with Landlock at ABI 3 or newer, and TCP connect and bind at ABI 4 or newer. Its qualified consumer is the committed probe: in such a pod it applies filesystem and TCP rulesets against positive controls and reports a verdict for each, exiting non-zero if one fails. The reference launcher ([§20.8](../design-doc/implementation/20-workload-sandboxing.md#example-confining-a-command)) is tested on local VMs, containers and in CI, awaiting provider qualification. Nested seccomp user notification is a separate capability, `seccomp-user-notification`, reserved: the probe gives it its own verdict, because container runtime and default-profile changes can break it independently of the kernel.
 
